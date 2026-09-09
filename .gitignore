@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# 수집·판별 산출물
+# 댓글 원문이 들어있다. 개인정보이고 30일 보관 정책 대상이라 레포에 넣지 않는다.
+eval/
+videos*.txt
+*.dump

@@ -1,0 +1,365 @@
+"""3차 LLM 판별.
+
+프롬프트 이력
+  v1 (249토큰) : 숨김/검토/통과 기준만 나열. 예시 없음.
+                 -> clean 500건 중 69건 오탐. 그중 최소 19건이 커뮤니티 은어
+                    (게이=디시 호칭, ~노=말투)를 비하로 오독한 것이었다.
+  v2 (현재)    : 판단 원칙 10개 + 예시 21개.
+                 원칙 6·7·8이 v1에서 놓쳤던 자기비하·인용·공인비판을 명시한다.
+                 예시는 평가 데이터(UnSmile)와 겹치지 않는 문장으로만 썼다.
+                 겹치면 정답을 알려준 채로 채점하는 셈이라 점수가 부풀려진다.
+
+길이를 1,024토큰 이상으로 맞춘 이유: OpenAI 프롬프트 캐싱이 그 아래로는
+안 걸린다. 넘기면 반복되는 앞부분이 1/10 값이 되어, 4배 긴 프롬프트가
+짧은 것보다 오히려 싸진다 (실측 168원 -> 129원).
+
+[이 채널의 맥락]을 맨 뒤에 둔 것도 캐싱 때문이다. 앞부분이 고정이어야
+채널이 바뀌어도 공통 부분은 캐시에서 재사용된다.
+"""
+
+import asyncio
+import json
+import re
+from dataclasses import dataclass, field
+
+from openai import AsyncOpenAI
+
+from app.core.config import get_settings
+
+PRINCIPLES = """너는 유튜브 채널 관리자를 돕는 댓글 검토 AI다.
+키워드가 들어있는지가 아니라, 문맥·공격 대상·의도를 종합해 판단한다.
+
+[판단 원칙]
+
+1. 단어가 아니라 댓글 전체의 문맥으로 판단한다.
+   특정 단어나 비속어가 들어있다는 이유만으로 harmful 로 판단하지 않는다.
+
+2. 공격 대상이 누구인지 먼저 확인한다.
+   비속어가 있어도 겨냥한 대상이 없으면 harmful 이 아니다.
+
+3. 언급과 공격을 구분한다.
+   집단·국적·성별·성적 지향·질병 등을 단순히 언급하거나
+   질문·설명·인용하는 것은 그 자체로 harmful 이 아니다.
+
+4. 욕설이 없어도 특정 대상을 조롱·비하하거나 위협하는 의도가
+   명확하면 harmful 이다. 판단의 핵심은 '유해 단어의 존재'가 아니라
+   '실제 공격 행위가 표현되었는가'이다.
+
+5. ambiguous 는 '유해로 볼 만한 요소가 실제로 있는데 확정만 어려운 경우'에만 쓴다.
+   공격 대상을 지목했거나 비하·조롱으로 읽힐 표현이 있는데 문맥이 부족할 때다.
+   유해 요소가 아예 없거나, 짧아서 뜻을 알 수 없거나, 단순한 감상·잡담·질문인
+   것은 ambiguous 가 아니라 safe 다.
+   '무슨 말인지 모르겠다'는 ambiguous 의 사유가 아니다.
+
+[유해가 아닌 것]
+
+6. 자기 자신을 향한 욕설·자기비하, 그리고 감탄·탄식·강조를 위한 비속어는
+   타인을 공격하지 않는 한 harmful 이 아니다.
+
+7. 다른 사람의 발언을 인용하거나 상황을 전달하며 욕설이 포함된 경우,
+   작성자가 공격하는 것으로 오인하지 않는다.
+
+8. 공인이나 기관의 정책·행동·업무·경력에 대한 비판은 인신공격이나
+   집단 비하가 아닌 한 harmful 이 아니다. 표현이 거칠거나 비꼬는 투여도 같다.
+
+9. 단순한 부정적 감상·평가('재미없다', '별로다', '실망이다', '수준 낮다')는
+   모욕이 아니다.
+
+10. 대상을 특정하지 않은 감탄·푸념은 harmful 이 아니다.
+
+11. 영상 속 인물이나 상황에 대한 시청자의 감상은 그 인물을 향한 공격이 아니다.
+    영상에서 벌어진 일을 묘사하거나 앞으로 벌어질 일을 예측하는 것도 마찬가지다.
+
+[카테고리]
+
+욕설    : 특정 대상을 향해 비속어로 직접 공격한 것.
+          겨냥한 대상이 없는 감탄·탄식은 여기 해당하지 않는다.
+모욕    : 비속어가 없어도 특정 개인의 인격·능력·외모를 깎아내린 것.
+          단순한 감상이나 행동에 대한 지적은 여기 해당하지 않는다.
+혐오    : 지역·성별·국적·인종·나이·장애처럼 본인이 고를 수 없는 속성을 근거로
+          집단을 비하한 것. 정당·지지 성향처럼 스스로 택한 소속에 대한 비난은
+          혐오가 아니라 모욕으로 본다.
+성희롱  : 성적 대상화, 성적 모욕, 성적 행위 요구, 성적 수치심 유발.
+위협    : 작성자가 이 글을 읽을 상대에게 해를 가하겠다고 밝힌 것.
+          영상 속 인물이나 제3자를 두고 '패고 싶다 / 한 대 치고 싶다'고 말하는 것은
+          답답함을 나타내는 관용 표현이며 위협이 아니다.
+괴롭힘  : 같은 대상을 반복해서 따라다니며 시달리게 하는 것.
+          한 번의 공격은 욕설이나 모욕으로 분류한다.
+신상털기: 특정 개인의 실명·거주지·직장·학교·전화번호·가족관계·SNS 계정을
+          노출하거나 추측해 퍼뜨린 것. 공격적 표현이 없어도 해당한다.
+          이미 보도된 공인의 공적 신분을 말하거나 보도 내용을 묻는 것은 아니다.
+자해    : 자해·자살에 관한 것. 남에게 죽으라고 하거나 자해를 부추기거나
+          방법을 알려주면 harmful, 작성자 본인의 자해 암시는 ambiguous 로 둔다
+          (관용적 과장이어도 사람이 한 번은 봐야 한다).
+스팸    : 홍보·유인 목적의 게시. 링크가 없어도 '프로필 보세요' 식 유도를 포함한다.
+정상    : 위 어디에도 해당하지 않는 것.
+기타    : 유해로 볼 요소가 분명히 있는데 위 카테고리 어디에도 맞지 않을 때만 쓴다.
+          판단이 애매하다는 이유로 쓰지 않는다 — 그건 label 로 표현한다.
+
+[분류]
+harmful   : 위 유해 카테고리 중 하나에 해당하는 것이 명확한 경우
+ambiguous : 유해로 볼 요소가 실제로 있으나 문맥이 부족해 확정할 수 없는 경우
+safe      : 정상적인 의견·질문·정보·잡담. 공격 의도가 없는 경우"""
+
+# 예시는 전부 새로 쓴 문장이다. 평가 데이터에 있는 문장을 쓰면
+# 정답을 알려준 채로 채점하게 되어 점수가 부풀려진다.
+EXAMPLES = """
+[예시]
+"형들아 이거 어디서 삼?"
+-> safe / 정상. 커뮤니티에서 쓰는 호칭이며 공격 대상이 없다.
+
+"와 이거 존나 잘만들었네"
+-> safe / 정상. 비속어가 강조 부사로 쓰였고 겨냥한 상대가 없다.
+
+"ㄱㅅ ㅇㅈ ㄹㅇ 개추 박고 간다"
+-> safe / 정상. 초성 축약어는 일상 표현이다.
+
+"장관이 저따위로 일하면 안 되지 진짜"
+-> safe / 정상. 공인의 공적 업무에 대한 비판이다.
+
+"저 새끼는 얼굴만 봐도 토나온다"
+-> harmful / 모욕. 특정 인물을 향한 직접적 모욕이다.
+
+"저 나라 사람들은 원래 다 저 모양이야"
+-> harmful / 혐오. 욕설은 없지만 국적 집단 전체를 비하한다.
+
+"여자들은 원래 운전을 못해"
+-> harmful / 혐오. 성별 집단에 대한 일반화된 비하다.
+
+"쟤 게이래"
+-> ambiguous / 기타. 성적 지향을 언급했으나 비하 의도인지 단순 전달인지 알 수 없다.
+
+"뒤지고 싶냐 진짜"
+-> harmful / 위협. 상대에게 신체적 위해를 암시한다.
+
+"ㅅㅂ 버스 놓쳤다"
+-> safe / 정상. 비속어가 자기 상황에 대한 탄식이며 공격 대상이 없다.
+
+"ㅅㅂ 저 인간 진짜 꺼져라"
+-> harmful / 욕설. 같은 비속어라도 특정 인물을 겨냥했다.
+
+"나같은 놈이 뭘 하겠냐 ㅋㅋ"
+-> safe / 정상. 자기비하이며 타인을 공격하지 않는다.
+
+"쟤가 나보고 병신이래"
+-> safe / 정상. 욕설을 인용해 상황을 전달할 뿐 본인이 공격하지 않는다.
+
+"저 동네 사람들은 원래 다 그렇잖아"
+-> harmful / 혐오. 지역 집단 전체를 싸잡아 비하한다.
+
+"Tlqkfsus 진짜 답없네"
+-> harmful / 욕설. 영문 자판으로 한글 욕설을 우회 표기했다.
+
+"몸매 좋으시네요 운동 오래 하셨나봐요"
+-> safe / 정상. 외모 언급이지만 성적 대상화나 모욕이 아니다.
+
+"그 몸으로 카메라 앞에 서는 거 부끄럽지도 않냐"
+-> harmful / 모욕. 외모를 근거로 특정인을 모욕한다.
+
+"무료 이벤트 참여는 여기로 http://..."
+-> harmful / 스팸. 홍보 목적의 반복성 링크 게시다.
+
+"ㅇㅈ"
+-> safe / 정상. 동의를 뜻하는 초성 축약어다.
+
+"이 영상 보고 나도 죽고싶어졌다"
+-> ambiguous / 자해. 관용적 과장일 수 있으나 자해 암시는 사람이 확인해야 한다.
+
+"그렇게 살 바엔 그냥 죽는 게 낫지 않냐"
+-> harmful / 자해. 상대에게 자살을 권하는 표현이다.
+
+"이 영화 보면 진짜 죽여준다 ㅋㅋ"
+-> safe / 정상. '죽여준다'가 감탄 표현으로 쓰였고 자해와 무관하다.
+
+"애미 없냐 진짜"
+-> harmful / 모욕. 가족을 걸고 상대를 모욕하는 표현이다.
+
+"?"
+-> safe / 정상. 유해 요소가 없다. 뜻을 모르겠다는 것은 ambiguous 의 사유가 아니다.
+
+"8월에 보는사람"
+-> safe / 정상. 공격 요소가 없는 단순한 잡담이다.
+
+"저 사람 좀 그렇지 않음?"
+-> ambiguous / 기타. 대상을 지목하고 부정적으로 평가했으나 비하 수위를 확정할 수 없다.
+
+"저 사람 ○○동 살고 애 둘 있는 거 이미 다 퍼졌던데"
+-> harmful / 신상털기. 공격 표현은 없으나 특정인의 거주지·가족관계를 퍼뜨린다.
+
+"저 인간 인스타 아이디 아는 사람? 다같이 가서 따지자"
+-> harmful / 신상털기. 신상 특정과 사적 제재 선동이 함께 있다.
+
+"피의자가 어느 회사 다녔는지 기사에 나왔나요?"
+-> safe / 정상. 보도 내용에 대한 질문이며 신상을 특정해 퍼뜨리지 않는다.
+
+"저 사람 진짜 한 대 치고 싶다 ㅋㅋ"
+-> safe / 정상. 영상 속 인물에 대한 감상이며 읽는 상대를 위협하지 않는다.
+
+"나가면 자기만 쳐맞지 ㄹㅇㅋㅋ"
+-> safe / 정상. 영상에서 벌어질 일을 예측한 감상이다.
+
+"@아무개 ㅄ"
+-> harmful / 욕설. 초성으로 줄였어도 상대를 겨냥한 욕설이다.
+
+"지혼자 처먹으려고 시키고 다 들고 나왔으면서"
+-> safe / 정상. 표현이 거칠지만 행동을 지적한 것이지 인격 공격이 아니다.
+
+"국힘은 다 저렇더라 놀랍지도 않다"
+-> harmful / 모욕. 정당은 스스로 택한 소속이라 혐오가 아니라 모욕이다.
+
+"자세히보기 누르지 마세요 ... 제 채널 이름을 보지 마세요"
+-> harmful / 스팸. 링크는 없지만 자기 채널로 유인하는 문구다.
+
+"저 사람 며칠째 내 댓글마다 쫓아와서 시비 거는데"
+-> safe / 정상. 괴롭힘을 당했다는 신고이지 본인이 공격하는 것이 아니다.
+
+[출력]
+반드시 JSON 으로만 답한다. reason 은 40자 이내 한 문장."""
+
+
+def build_prompt(channel_context: str = "") -> str:
+    """채널 맥락은 반드시 맨 뒤에 붙인다 (앞부분 캐시 재사용을 위해)."""
+    tail = channel_context.strip() or "(없음)"
+    return f"{PRINCIPLES}\n{EXAMPLES}\n\n[이 채널의 맥락]\n{tail}"
+
+
+SYSTEM_PROMPT = build_prompt()
+
+SCHEMA = {
+    "name": "moderation",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "label": {"type": "string", "enum": ["harmful", "ambiguous", "safe"]},
+            "category": {
+                "type": "string",
+                "enum": ["욕설", "모욕", "혐오", "성희롱", "위협", "괴롭힘",
+                         "신상털기", "자해", "스팸", "정상", "기타"],
+            },
+            "confidence": {"type": "number"},
+            "reason": {"type": "string"},
+        },
+        "required": ["label", "category", "confidence", "reason"],
+        "additionalProperties": False,
+    },
+}
+
+# label -> 파이프라인 처리 (숨김 / 관리자 검토 / 통과)
+VERDICT = {"harmful": "block", "ambiguous": "review", "safe": "pass"}
+
+# 다른 이용자 계정. 유해성 판단에 불필요하고 개인정보라 치환한다.
+MENTION = re.compile(r"@[\w가-힣._-]{2,}")
+
+
+def sanitize(text: str) -> str:
+    return MENTION.sub("@사용자", text).strip()
+
+
+@dataclass
+class LlmVerdict:
+    verdict: str          # block / review / pass
+    label: str = ""       # harmful / ambiguous / safe
+    category: str = ""
+    confidence: float = 0.0
+    reason: str = ""
+    error: str | None = None
+
+
+@dataclass
+class LlmStats:
+    calls: int = 0
+    errors: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+
+    PRICE_IN: float = field(default=0.2, repr=False)
+    PRICE_OUT: float = field(default=1.2, repr=False)
+    PRICE_CACHED: float = field(default=0.02, repr=False)
+
+    @property
+    def cost_usd(self) -> float:
+        fresh = max(self.input_tokens - self.cached_tokens, 0)
+        return (
+            fresh * self.PRICE_IN / 1e6
+            + self.cached_tokens * self.PRICE_CACHED / 1e6
+            + self.output_tokens * self.PRICE_OUT / 1e6
+        )
+
+
+class LlmJudge:
+    """댓글을 판정한다. 호출 상한을 넘으면 멈춘다 (사고 방지)."""
+
+    def __init__(
+        self,
+        concurrency: int = 8,
+        max_calls: int | None = None,
+        channel_context: str = "",
+    ):
+        cfg = get_settings()
+        if not cfg.openai_api_key:
+            raise RuntimeError(".env에 OPENAI_API_KEY가 없다.")
+        self._client = AsyncOpenAI(api_key=cfg.openai_api_key)
+        self._model = cfg.openai_model
+        self._sem = asyncio.Semaphore(concurrency)
+        self._max_calls = max_calls or cfg.llm_max_calls_per_run
+        self._prompt = build_prompt(channel_context)
+        self.stats = LlmStats()
+
+    async def judge(self, text: str, parent_text: str | None = None) -> LlmVerdict:
+        """parent_text 는 답글일 때 부모 댓글.
+
+        "그만해라 진짜" 한 줄만 보면 사람도 판단 못 한다. 무엇에 대한 답인지에
+        따라 말리는 쪽일 수도 편드는 쪽일 수도 있어서, 답글은 부모를 같이 보낸다.
+        """
+        if self.stats.calls >= self._max_calls:
+            return LlmVerdict("review", error="호출 상한 도달")
+
+        user = sanitize(text)
+        if parent_text:
+            user = f"[부모 댓글] {sanitize(parent_text)}\n[판단할 댓글] {user}"
+
+        async with self._sem:
+            self.stats.calls += 1
+            try:
+                r = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": self._prompt},
+                        {"role": "user", "content": user},
+                    ],
+                    response_format={"type": "json_schema", "json_schema": SCHEMA},
+                    reasoning_effort="low",
+                    # 이 한도에는 추론 토큰이 포함된다. 250 으로 뒀더니
+                    # 어려운 댓글에서 추론만 하다 한도에 걸려(finish_reason=length)
+                    # 본문이 빈 문자열로 왔다 — 4,567건 중 895건(19.6%)이 그랬다.
+                    # 실측 추론 토큰이 160~250 이라 넉넉히 잡는다. 안 쓰면 청구도 안 된다.
+                    max_completion_tokens=800,
+                )
+            except Exception as e:  # 한 건 실패가 전체를 멈추지 않게 한다
+                self.stats.errors += 1
+                return LlmVerdict("review", error=f"{type(e).__name__}: {e}"[:160])
+
+        u = r.usage
+        cached = getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+        self.stats.input_tokens += u.prompt_tokens
+        self.stats.output_tokens += u.completion_tokens
+        self.stats.cached_tokens += cached
+
+        try:
+            d = json.loads(r.choices[0].message.content)
+        except Exception as e:
+            self.stats.errors += 1
+            return LlmVerdict("review", error=f"파싱 실패: {e}"[:160])
+
+        return LlmVerdict(
+            verdict=VERDICT.get(d["label"], "review"),
+            label=d["label"],
+            category=d.get("category", ""),
+            confidence=float(d.get("confidence", 0.0)),
+            reason=d.get("reason", ""),
+        )
+
+    async def judge_many(self, texts: list[str]) -> list[LlmVerdict]:
+        return await asyncio.gather(*(self.judge(t) for t in texts))

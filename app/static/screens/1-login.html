@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: 'IBM Plex Sans KR', 'Malgun Gothic', sans-serif; }
+  a { color: #5b47e0; }
+  a:hover { color: #4735c4; }
+</style>
+</helmet>
+
+<div style="position:relative; width:1440px; height:900px; background:#121127; overflow:hidden; display:flex; align-items:center; justify-content:center;">
+
+  <!-- decorative dot-cluster field -->
+  <svg width="1440" height="900" style="position:absolute; top:0; left:0;">
+    <circle cx="180" cy="140" r="4" fill="#ffffff" opacity="0.10"/>
+    <circle cx="230" cy="180" r="3" fill="#ffffff" opacity="0.08"/>
+    <circle cx="150" cy="220" r="5" fill="#ffffff" opacity="0.09"/>
+    <circle cx="260" cy="120" r="3" fill="#ffffff" opacity="0.07"/>
+    <circle cx="120" cy="170" r="3" fill="#ffffff" opacity="0.08"/>
+    <circle cx="420" cy="760" r="4" fill="#ffffff" opacity="0.08"/>
+    <circle cx="380" cy="800" r="3" fill="#ffffff" opacity="0.07"/>
+    <circle cx="1240" cy="150" r="4" fill="#ffffff" opacity="0.09"/>
+    <circle cx="1290" cy="200" r="3" fill="#ffffff" opacity="0.07"/>
+    <circle cx="1310" cy="140" r="3" fill="#ffffff" opacity="0.08"/>
+    <circle cx="1260" cy="740" r="4" fill="#ffffff" opacity="0.08"/>
+    <circle cx="1200" cy="780" r="3" fill="#ffffff" opacity="0.07"/>
+    <!-- the outlier dot -->
+    <circle cx="1340" cy="640" r="6" fill="#8f7ef5" opacity="0.85"/>
+  </svg>
+
+  <!-- login card -->
+  <div style="position:relative; width:440px; background:#ffffff; border-radius:16px; padding:44px 40px 36px; box-shadow:0 24px 60px rgba(0,0,0,0.35);">
+
+    <!-- logo mark -->
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:32px;">
+      <svg width="26" height="26" viewBox="0 0 26 26">
+        <circle cx="6" cy="8" r="2.4" fill="#c9c6da"/>
+        <circle cx="12" cy="6" r="2.4" fill="#c9c6da"/>
+        <circle cx="7" cy="15" r="2.4" fill="#c9c6da"/>
+        <circle cx="14" cy="14" r="2.4" fill="#c9c6da"/>
+        <circle cx="21" cy="21" r="3.4" fill="#5b47e0"/>
+      </svg>
+      <span style="font-size:19px; font-weight:700; letter-spacing:-0.01em; color:#17171f;">Outlier</span>
+    </div>
+
+    <h1 style="margin:0 0 10px; font-size:25px; font-weight:700; line-height:1.35; color:#17171f;">여러 채널의 위험한 댓글을<br>놓치지 마세요</h1>
+    <p style="margin:0 0 28px; font-size:14px; line-height:1.6; color:#6b6b78;">채널마다 학습하는 AI가 지금 확인해야 할 댓글부터<br>우선순위로 정리해드려요.</p>
+
+    <button style="width:100%; height:50px; display:flex; align-items:center; justify-content:center; gap:10px; background:#ffffff; border:1px solid #dcdce4; border-radius:10px; font-size:15px; font-weight:600; color:#17171f; cursor:pointer;">
+      <svg width="18" height="18" viewBox="0 0 18 18">
+        <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84c-.21 1.13-.85 2.09-1.81 2.73v2.27h2.93c1.71-1.58 2.69-3.9 2.69-6.64z"/>
+        <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.93-2.27c-.81.55-1.85.87-3.03.87-2.33 0-4.31-1.57-5.02-3.68H.96v2.34C2.44 15.98 5.48 18 9 18z"/>
+        <path fill="#FBBC05" d="M3.98 10.74c-.18-.55-.29-1.13-.29-1.74s.11-1.19.29-1.74V4.92H.96C.35 6.14 0 7.53 0 9s.35 2.86.96 4.08l3.02-2.34z"/>
+        <path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.59-2.59C13.46.89 11.43 0 9 0 5.48 0 2.44 2.02.96 4.92l3.02 2.34C4.69 5.15 6.67 3.58 9 3.58z"/>
+      </svg>
+      Google로 시작하기
+    </button>
+
+    <p style="margin:22px 0 0; font-size:12px; line-height:1.6; color:#9a9aa6; text-align:center;">
+      로그인 시 Outlier의 <a href="#">이용약관</a> 및 <a href="#">개인정보처리방침</a>에<br>동의하는 것으로 간주됩니다.
+    </p>
+  </div>
+</div>
+</x-dc>
+
+<script>
+/* 시안을 클릭해 넘길 수 있게 붙인 얇은 이동 스크립트. 디자인은 손대지 않는다.
+   버튼/링크는 텍스트만 맞으면 잡고, div·span 은 잎사귀 수준일 때만 잡는다
+   (텍스트가 같은 큰 컨테이너를 실수로 잡지 않으려고). */
+(function () {
+  var NEXT = "/onboarding/2", CTA = "Google\ub85c \uc2dc\uc791\ud558\uae30", NAV = {"대시보드":"/app#/dashboard","채널 관리":"/app#/queue","관리 기준":"/app#/rules","처리 이력":"/app#/history","설정":"/app#/rules"};
+  function go(url) { return function (e) { e.preventDefault(); e.stopPropagation(); location.href = url; }; }
+  function bind(el, url) { el.style.cursor = "pointer"; el.addEventListener("click", go(url)); }
+
+  var all = document.querySelectorAll("button,a,div,span");
+  var found = 0;
+  for (var i = 0; i < all.length; i++) {
+    var el = all[i], tag = el.tagName.toLowerCase();
+    var t = (el.textContent || "").replace(/\s+/g, " ").trim();
+    var leafish = tag === "button" || tag === "a" || el.children.length <= 1;
+    if (!leafish) continue;
+    if (t === CTA) { bind(el, NEXT); found++; }
+    else if (NAV[t]) { bind(el, NAV[t]); }
+  }
+  // 버튼을 못 찾았으면 프로토타입이 막힌다. 눈에 보이는 안내를 띄운다.
+  if (!found) {
+    var b = document.createElement("div");
+    b.textContent = "다음 →";
+    b.style.cssText = "position:fixed;right:22px;bottom:22px;background:#17171f;color:#fff;" +
+      "padding:12px 20px;border-radius:10px;font:600 14px system-ui;cursor:pointer;z-index:9999";
+    b.onclick = function () { location.href = NEXT; };
+    document.body.appendChild(b);
+  }
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === "ArrowRight") location.href = NEXT;
+  });
+})();
+</script>
+</body>
+</html>
