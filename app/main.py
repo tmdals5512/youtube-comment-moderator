@@ -1,5 +1,6 @@
 """Outlier 백엔드 진입점."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from sqlalchemy import text
 from app.api import auth, channels, health, moderation, review, rules
 from app.core.config import get_settings
 from app.db.session import engine
+from app.services.retention import run_forever
 
 settings = get_settings()
 
@@ -41,7 +43,17 @@ async def lifespan(app: FastAPI):
             "  그래도 안 되면 Docker Desktop 자체가 꺼진 것일 수 있습니다.\n"
         ) from None
 
+    # 보관기한 파기를 서버가 스스로 돌린다. 손으로 돌리는 스크립트만
+    # 있으면 누군가 잊는 순간 30일 정책이 조용히 깨진다.
+    파기 = asyncio.create_task(run_forever())
+
     yield
+
+    파기.cancel()
+    try:
+        await 파기
+    except asyncio.CancelledError:
+        pass
     await engine.dispose()
 
 

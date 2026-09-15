@@ -15,6 +15,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select
+from sqlalchemy import text as sq
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import current_user, require_channel, require_comment, require_role
@@ -122,6 +123,24 @@ def _since(period: str):
     return datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
 
 
+class Workload(BaseModel):
+    """관리자가 실제로 얼마나 일했나. 전부 실측이다.
+
+    '몇 시간 아꼈다' 는 넣지 않는다. 안 썼을 때 몇 시간 걸렸을지는 관측할
+    수 없어서, 그건 추정이지 측정이 아니다. 대신 잰 값만 보여주고 판단은
+    보는 사람에게 맡긴다.
+    """
+
+    reviewed: int = Field(..., description="관리자가 실제로 처리한 건수")
+    seconds_per_item: float | None = Field(
+        None, description="건당 처리 시간(초). 실측 중앙값"
+    )
+    all_comments_hours: float | None = Field(
+        None, description="이 속도로 전체 댓글을 다 봤다면 걸렸을 시간"
+    )
+    seen_ratio: float = Field(..., description="전체 중 관리자가 본 비율")
+
+
 class Stats(BaseModel):
     channel_id: int
     period: str
@@ -133,6 +152,7 @@ class Stats(BaseModel):
     unreviewed: int = Field(..., description="큐에 남아 관리자를 기다리는 건수")
     review_rate: float = Field(..., description="검토 전환율. NF_R_104 목표 30% 이하")
     by_category: dict[str, int]
+    workload: Workload
 
 
 def _latest_assessment():
@@ -392,6 +412,64 @@ async def stats(
         unreviewed=unreviewed,
         review_rate=round(queued / total, 4) if total else 0.0,
         by_category=by_category,
+        workload=await _workload(db, channel_id, total),
+    )
+
+
+# 연속으로 처리한 것으로 볼 최대 간격. 이보다 오래 비면 자리를 뜬 것이다.
+# 실데이터에서 연속 구간은 3~180초였고, 중간에 16,318초짜리 공백도 있었다.
+REVIEW_GAP = 300
+
+
+async def _workload(db, channel_id: int, total: int) -> Workload:
+    """관리자의 실제 처리 속도. 가정하지 않고 잰다.
+
+    경쟁 서비스는 '댓글 1개 숨김 = 15초' 처럼 고정값을 쓴다. 그건 측정이
+    아니라 마케팅 숫자다. 사람마다, 댓글마다 다르다 — 짧은 건 3초, 긴 건
+    3분이 걸린다. 그래서 그 관리자가 실제로 쓴 시간을 쓴다.
+    """
+    간격 = (
+        await db.execute(
+            sq("""
+                SELECT EXTRACT(EPOCH FROM (a.executed_at - prev))::float AS gap
+                FROM (
+                  SELECT a.executed_at,
+                         lag(a.executed_at) OVER (
+                           PARTITION BY a.actor ORDER BY a.executed_at
+                         ) AS prev
+                  FROM actions a
+                  JOIN comments c ON c.id = a.comment_id
+                  WHERE c.channel_id = :cid
+                ) a
+                WHERE prev IS NOT NULL
+                  AND a.executed_at - prev < make_interval(secs => :gap)
+            """),
+            {"cid": channel_id, "gap": REVIEW_GAP},
+        )
+    ).scalars().all()
+
+    처리 = (
+        await db.execute(
+            sq("""
+                SELECT count(*) FROM comments
+                WHERE channel_id = :cid AND reviewed_at IS NOT NULL
+            """),
+            {"cid": channel_id},
+        )
+    ).scalar_one()
+
+    중앙값 = None
+    if 간격:
+        정렬 = sorted(간격)
+        중앙값 = round(정렬[len(정렬) // 2], 1)
+
+    return Workload(
+        reviewed=처리,
+        seconds_per_item=중앙값,
+        all_comments_hours=(
+            round(중앙값 * total / 3600, 1) if 중앙값 and total else None
+        ),
+        seen_ratio=round(처리 / total, 4) if total else 0.0,
     )
 
 

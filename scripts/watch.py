@@ -153,6 +153,15 @@ async def judge_round(channel_ids: set[int]) -> int:
             ctx = ch.context or ""
             auto_hide = ch.auto_hide_set
 
+            # AI 자동 판별에는 관리자 명시 동의가 필요하다 (YouTube API 정책).
+            # 동의 칸을 만들어두고 확인하지 않으면 정책이 문서에만 있는 셈이 된다.
+            if not ch.ai_consent_agreed:
+                raise SystemExit(
+                    f"[FAIL] 채널 {ch.id} 은 AI 판별 동의를 받지 않았다.\n"
+                    "  관리자 화면 > 채널 관리에서 동의하거나,\n"
+                    f"  python -m scripts.consent --channel {ch.id} --agree"
+                )
+
         if not rows:
             continue
 

@@ -124,6 +124,63 @@ async function loadChannels() {
 
 // ── 대시보드 ──────────────────────────────────────────
 
+/** 관리자가 실제로 얼마나 일했나.
+ *
+ *  '몇 시간 아꼈다' 는 쓰지 않는다. 안 썼을 때 몇 시간 걸렸을지는 잴 수
+ *  없어서 그건 추정이다. 잰 값만 보여주고 판단은 보는 사람에게 맡긴다.
+ */
+function 일한양(s) {
+  const w = s.workload;
+  if (!w || !w.reviewed) return "";
+
+  const 남은시간 =
+    w.seconds_per_item && s.unreviewed
+      ? (w.seconds_per_item * s.unreviewed) / 3600
+      : null;
+
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h2>처리 현황</h2>
+      <div style="display:flex;gap:28px;flex-wrap:wrap;margin-top:10px">
+        <div>
+          <div style="font-size:12px;color:var(--muted)">직접 처리한 댓글</div>
+          <div style="font-size:20px;font-weight:700">${num(w.reviewed)}건
+            <span style="font-size:12px;font-weight:400;color:var(--muted)">
+              전체의 ${(w.seen_ratio * 100).toFixed(2)}%</span></div>
+        </div>
+        ${
+          w.seconds_per_item
+            ? `<div>
+                 <div style="font-size:12px;color:var(--muted)">건당 처리 시간</div>
+                 <div style="font-size:20px;font-weight:700">${w.seconds_per_item}초
+                   <span style="font-size:12px;font-weight:400;color:var(--muted)">
+                     실측</span></div>
+               </div>
+               <div>
+                 <div style="font-size:12px;color:var(--muted)">전부 보셨다면</div>
+                 <div style="font-size:20px;font-weight:700">${w.all_comments_hours}시간
+                   <span style="font-size:12px;font-weight:400;color:var(--muted)">
+                     댓글 ${num(s.total)}건</span></div>
+               </div>`
+            : ""
+        }
+        ${
+          남은시간 !== null
+            ? `<div>
+                 <div style="font-size:12px;color:var(--muted)">남은 큐를 다 보면</div>
+                 <div style="font-size:20px;font-weight:700">${남은시간.toFixed(1)}시간
+                   <span style="font-size:12px;font-weight:400;color:var(--muted)">
+                     ${num(s.unreviewed)}건</span></div>
+               </div>`
+            : ""
+        }
+      </div>
+      <div class="note" style="margin-top:14px">건당 시간은 <b>실제로 잰 값</b>입니다
+        (연속으로 처리한 구간만, 중앙값). 위험도 높은 순으로 정렬돼 있어
+        위에서부터 일부만 보셔도 대부분을 막을 수 있습니다.</div>
+    </div>`;
+}
+
 async function viewDashboard() {
   loading();
   const period = localStorage.getItem("period") || "all";
@@ -160,6 +217,8 @@ async function viewDashboard() {
         <div class="n">${(s.review_rate * 100).toFixed(1)}<span style="font-size:16px">%</span></div>
         <div class="h">목표 30% 이하</div></div>
     </div>
+
+    ${일한양(s)}
 
     <div class="split">
       <div class="card">
@@ -782,12 +841,12 @@ async function viewChannels() {
 
   $("#connect").onclick = () => (location.href = "/api/channels/connect/start");
 
-  // 채널별 연동 상태는 따로 물어본다 (목록 API 는 가벼워야 한다)
+  // 채널별 동의 상태를 같이 물어본다 (목록 API 는 가벼워야 해서 따로 둔다)
   const 상태 = await Promise.all(
     list.map((c) =>
-      api(`/channels/${c.id}/context`)
-        .then(() => ({ ...c, ok: true }))
-        .catch(() => ({ ...c, ok: false }))
+      api(`/channels/${c.id}/consent`)
+        .then((x) => ({ ...c, ...x }))
+        .catch(() => ({ ...c, agreed: false }))
     )
   );
 
@@ -795,13 +854,21 @@ async function viewChannels() {
     ? 상태
         .map(
           (c) => `
-      <div style="display:flex;align-items:center;gap:12px;padding:12px 0;
+      <div style="display:flex;align-items:center;gap:12px;padding:14px 0;
                   border-bottom:1px solid var(--line-soft)">
         <div style="flex:1">
           <div style="font-size:14px;font-weight:600">${esc(c.channel_title)}</div>
-          <div style="font-size:11.5px;color:var(--muted);margin-top:3px">
-            채널 #${c.id}</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px">
+            채널 #${c.id} ·
+            ${
+              c.agreed
+                ? `<span style="color:var(--ok)">AI 판별 동의함</span>`
+                : `<span style="color:var(--critical)">동의 전 — 판별이 돌지 않습니다</span>`
+            }
+          </div>
         </div>
+        <button class="slim" data-consent="${c.id}" data-now="${c.agreed}"
+                style="flex:0 0 auto">${c.agreed ? "동의 철회" : "AI 판별 동의"}</button>
         <button class="slim danger" data-off="${c.id}"
                 style="flex:0 0 auto">연동 해제</button>
       </div>`
@@ -810,12 +877,42 @@ async function viewChannels() {
     : `<div class="empty" style="padding:24px">연동된 채널이 없습니다.<br>
          위 [+ 채널 연결]로 시작하세요.</div>`;
 
+  view.querySelectorAll("[data-consent]").forEach((b) => {
+    b.onclick = async () => {
+      const 켜는중 = b.dataset.now !== "true";
+      if (
+        켜는중 &&
+        !confirm(
+          "이 채널의 댓글을 AI가 자동으로 분석합니다.\n\n" +
+            "· AI는 위험도를 매기고 순서만 정합니다\n" +
+            "· 댓글을 가리는 것은 관리자가 누를 때만입니다\n" +
+            "· 댓글 원문은 30일 뒤 삭제됩니다\n\n" +
+            "동의하시겠습니까?"
+        )
+      )
+        return;
+      await api(`/channels/${b.dataset.consent}/consent`, {
+        method: "PUT",
+        body: JSON.stringify({ agreed: 켜는중 }),
+      });
+      toast(켜는중 ? "동의했습니다" : "동의를 철회했습니다");
+      viewChannels();
+    };
+  });
+
   view.querySelectorAll("[data-off]").forEach((b) => {
     b.onclick = async () => {
-      if (!confirm("연동을 해제하면 이 채널의 조치 권한이 사라집니다. 계속할까요?"))
+      if (
+        !confirm(
+          "연동을 해제하면 이 채널에서 수집한 댓글·판정·조치 이력이 " +
+            "전부 삭제됩니다.\n되돌릴 수 없습니다. 계속할까요?"
+        )
+      )
         return;
-      await api(`/channels/${b.dataset.off}/disconnect`, { method: "POST" });
-      toast("연동을 해제했습니다");
+      const r = await api(`/channels/${b.dataset.off}/disconnect`, {
+        method: "POST",
+      });
+      toast(`연동 해제 · 댓글 ${num(r.deleted_comments)}건을 삭제했습니다`);
       await loadChannels();
       viewChannels();
     };

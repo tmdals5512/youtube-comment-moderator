@@ -190,6 +190,57 @@ async def connect_callback(
     return RedirectResponse(f"/app#/channels?connected={붙임}")
 
 
+class ConsentOut(BaseModel):
+    channel_id: int
+    agreed: bool
+    agreed_at: datetime | None
+    can_judge: bool = Field(
+        ..., description="동의 전에는 판별을 돌리지 않는다"
+    )
+
+
+class ConsentUpdate(BaseModel):
+    agreed: bool = Field(..., description="AI 자동 판별에 동의하는지")
+
+
+def _consent_out(channel: Channel) -> ConsentOut:
+    ok = bool(channel.ai_consent_agreed)
+    return ConsentOut(
+        channel_id=channel.id,
+        agreed=ok,
+        agreed_at=channel.ai_consent_at,
+        can_judge=ok,
+    )
+
+
+@router.get(
+    "/{channel_id}/consent", response_model=ConsentOut, summary="AI 판별 동의 조회"
+)
+async def get_consent(channel: Channel = Depends(require_channel)):
+    return _consent_out(channel)
+
+
+@router.put(
+    "/{channel_id}/consent", response_model=ConsentOut, summary="AI 판별 동의 변경"
+)
+async def set_consent(
+    payload: ConsentUpdate,
+    channel: Channel = Depends(require_channel),
+    db: AsyncSession = Depends(get_db),
+):
+    """AI 자동 판별에 대한 관리자 명시 동의 (YouTube API 정책).
+
+    동의를 철회하면 이후 판별이 멈춘다. 이미 내려진 판정은 지우지 않는다 —
+    그건 관리자가 실제로 보고 조치한 근거라, 소급해 없애면 이력이 깨진다.
+    지우고 싶으면 연동 해제를 쓴다(그쪽은 전부 지운다).
+    """
+    channel.ai_consent_agreed = payload.agreed
+    channel.ai_consent_at = datetime.utcnow() if payload.agreed else None
+    await db.commit()
+    await db.refresh(channel)
+    return _consent_out(channel)
+
+
 class DisconnectResult(BaseModel):
     channel_id: int
     deleted_comments: int
