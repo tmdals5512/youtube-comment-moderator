@@ -100,20 +100,33 @@ ONBOARDING = {
 }
 
 
+def _page(path: Path) -> FileResponse:
+    """HTML 은 브라우저가 들고 있지 않게 한다.
+
+    캐시 헤더가 없으면 브라우저가 알아서 오래 들고 있는다. 그래서 화면을
+    고쳐도 옛날 사이드바가 그대로 뜨는 일이 생긴다 — 실제로 겪었다.
+    no-cache 는 '쓰지 마라'가 아니라 '쓰기 전에 물어봐라'다. 안 바뀌었으면
+    304 로 끝나서 비용도 거의 없다.
+
+    /static 아래 js·css 는 StaticFiles 가 ETag 를 붙여줘서 그대로 둔다.
+    """
+    return FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/", include_in_schema=False)
 async def index() -> FileResponse:
     """첫 화면은 로그인. 프로토타입 흐름이 여기서 시작한다."""
-    return FileResponse(STATIC_DIR / "screens" / ONBOARDING[1])
+    return _page(STATIC_DIR / "screens" / ONBOARDING[1])
 
 
 @app.get("/onboarding/{step}", include_in_schema=False)
 async def onboarding(step: int) -> FileResponse:
     if step not in ONBOARDING:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"온보딩 {step}단계 없음")
-    return FileResponse(STATIC_DIR / "screens" / ONBOARDING[step])
+    return _page(STATIC_DIR / "screens" / ONBOARDING[step])
 
 
 @app.get("/app", include_in_schema=False)
 async def admin() -> FileResponse:
     """관리자 화면 (대시보드·검토 큐·숨김·관리 기준·이력)."""
-    return FileResponse(STATIC_DIR / "app.html")
+    return _page(STATIC_DIR / "app.html")

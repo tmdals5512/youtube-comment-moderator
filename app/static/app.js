@@ -183,7 +183,11 @@ function 일한양(s) {
 
 async function viewDashboard() {
   loading();
-  const period = localStorage.getItem("period") || "all";
+  // localStorage 값은 사용자가 고친 적이 있을 수도 있고, 예전 버전이 남긴
+  // 값일 수도 있다. 그대로 API 에 넘기면 422 가 나서 화면이 통째로 깨진다.
+  const PERIODS = ["today", "7d", "30d", "all"];
+  const saved = localStorage.getItem("period");
+  const period = PERIODS.includes(saved) ? saved : "all";
   const s = await api(`/channels/${channelId()}/stats?period=${period}`);
   const judged = s.total - s.pending;
   const pct = (n) => (judged ? (n / judged) * 100 : 0);
@@ -943,12 +947,45 @@ const ROUTES = {
   "#/history": viewHistory,
 };
 
+/** 아직 채널이 없을 때. 새로 가입한 사람이 처음 보는 화면이다.
+ *
+ *  전에는 여기서 /api/channels/0/queue 를 불러 404 가 났고, 화면에
+ *  "불러오지 못했습니다 404" 가 떴다. 새 사용자가 가입하고 처음 보는 게
+ *  오류 메시지면 안 된다.
+ */
+function showNoChannel() {
+  stopRefresh();
+  view.innerHTML = `
+    <h1>시작하기</h1>
+    <div class="sub">아직 연동된 채널이 없습니다</div>
+    <div class="card">
+      <div class="empty" style="padding:44px 20px;text-align:center">
+        <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:8px">
+          유튜브 채널을 연결해주세요</div>
+        <div style="margin-bottom:22px">연결하면 댓글을 모아 위험한 것부터
+          보여드립니다.</div>
+        <button id="go-connect" style="flex:0 0 auto;padding:10px 28px">
+          채널 연결하기</button>
+      </div>
+    </div>`;
+  $("#go-connect").onclick = () => (location.hash = "#/channels");
+}
+
 async function route() {
   // 연동에서 돌아오면 '#/channels?connected=1' 처럼 뒤에 값이 붙는다.
   // 앞부분만 떼어 경로를 고른다.
   const base = location.hash.split("?")[0];
   const hash = ROUTES[base] ? base : "#/queue";
   if (base !== hash) return (location.hash = hash);
+
+  // 채널 관리 화면은 채널이 없어도 열려야 한다 — 거기서 연결하니까.
+  // 나머지 화면은 채널을 골라야 뜻이 있다.
+  if (!channels.length && hash !== "#/channels") {
+    document.querySelectorAll(".nav-item").forEach((a) => {
+      a.classList.toggle("on", a.getAttribute("href") === hash);
+    });
+    return showNoChannel();
+  }
   document.querySelectorAll(".nav-item").forEach((a) => {
     a.classList.toggle("on", a.getAttribute("href") === hash);
   });
