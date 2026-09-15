@@ -77,7 +77,7 @@
    버튼/링크는 텍스트만 맞으면 잡고, div·span 은 잎사귀 수준일 때만 잡는다
    (텍스트가 같은 큰 컨테이너를 실수로 잡지 않으려고). */
 (function () {
-  var NEXT = "/onboarding/6", CTA = "\ub3d9\uc758\ud558\uace0 \uc5f0\ub3d9 \uc644\ub8cc", NAV = {"대시보드":"/app#/dashboard","채널 관리":"/app#/queue","관리 기준":"/app#/rules","처리 이력":"/app#/history","설정":"/app#/rules"};
+  var NEXT = "/onboarding/6", CTA = "\ub3d9\uc758\ud558\uace0 \uc5f0\ub3d9 \uc644\ub8cc", NAV = {"대시보드":"/app#/dashboard","채널 관리":"/onboarding/6","관리 기준":"/app#/rules","처리 이력":"/app#/history"};
   function go(url) { return function (e) { e.preventDefault(); e.stopPropagation(); location.href = url; }; }
   function bind(el, url) { el.style.cursor = "pointer"; el.addEventListener("click", go(url)); }
 

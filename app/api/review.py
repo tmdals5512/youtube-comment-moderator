@@ -17,8 +17,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Action, Channel, Comment, RiskAssessment, Video
+from app.core.deps import current_user, require_channel, require_comment, require_role
+from app.db.models import Action, Channel, Comment, RiskAssessment, User, Video
 from app.db.session import get_db
+from app.services import youtube_actions as yt
 
 router = APIRouter(tags=["review"])
 
@@ -95,7 +97,6 @@ class QueueItem(BaseModel):
 
 class ActionRequest(BaseModel):
     action: ActionType = Field(..., description="hide=숨김 / keep=유지 / ban_author=채널차단")
-    actor: str | None = Field(None, max_length=100, description="처리한 관리자")
     note: str | None = Field(None, description="판단 근거 메모")
 
 
@@ -104,8 +105,9 @@ class ActionResult(BaseModel):
     action: ActionType
     status: str
     youtube_synced: bool = Field(
-        False, description="유튜브 실제 반영 여부. 채널 소유자 OAuth 가 없어 항상 False"
+        False, description="유튜브에 실제로 반영됐는지. 채널 미연동이면 False"
     )
+    note: str | None = Field(None, description="실패했으면 그 사유")
     reviewed_at: datetime
 
 
@@ -131,11 +133,6 @@ class Stats(BaseModel):
     unreviewed: int = Field(..., description="큐에 남아 관리자를 기다리는 건수")
     review_rate: float = Field(..., description="검토 전환율. NF_R_104 목표 30% 이하")
     by_category: dict[str, int]
-
-
-async def _require_channel(db: AsyncSession, channel_id: int) -> None:
-    if await db.get(Channel, channel_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"채널 {channel_id} 없음")
 
 
 def _latest_assessment():
@@ -213,7 +210,7 @@ def _to_item(c, ra, parent_content, video_title, channel_title, rank) -> QueueIt
     summary="검토 큐 (관리자가 판단해야 할 댓글)",
 )
 async def queue(
-    channel_id: int,
+    channel: Channel = Depends(require_channel),
     kind: Literal["all", "judge", "info"] = Query(
         "all", description="judge=판단 필요만 / info=참고만"
     ),
@@ -221,8 +218,7 @@ async def queue(
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    await _require_channel(db, channel_id)
-
+    channel_id = channel.id
     where = [Comment.status == "queued", Comment.reviewed_at.is_(None)]
     if kind != "all":
         target = "queue_judge" if kind == "judge" else "queue_info"
@@ -238,13 +234,12 @@ async def queue(
     summary="숨김 목록 (오탐을 발견하는 통로)",
 )
 async def hidden(
-    channel_id: int,
+    channel: Channel = Depends(require_channel),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    await _require_channel(db, channel_id)
-    rows = await _rows(db, channel_id, [Comment.status == "hidden"], limit, offset)
+    rows = await _rows(db, channel.id, [Comment.status == "hidden"], limit, offset)
     return [_to_item(*r) for r in rows]
 
 
@@ -254,23 +249,61 @@ async def hidden(
     summary="조치 (숨김 / 유지 / 채널차단)",
 )
 async def act(
-    comment_id: int, payload: ActionRequest, db: AsyncSession = Depends(get_db)
+    payload: ActionRequest,
+    comment: Comment = Depends(require_comment),
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    comment = await db.get(Comment, comment_id)
-    if comment is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"댓글 {comment_id} 없음")
-
+    comment_id = comment.id
     now = datetime.now(UTC).replace(tzinfo=None)
 
-    # 유튜브 반영은 채널 소유자 OAuth 가 있어야 한다. 지금은 우리 채널이
-    # 없어서 DB 에만 남긴다 — youtube_synced=False 가 그 표시다.
+    # 유튜브에 실제로 반영한다. 채널 소유자가 연동하지 않았으면 토큰이
+    # 없어서 DB 에만 기록된다 — youtube_synced 가 그 구분이다.
+    #
+    # 유튜브 반영이 실패해도 DB 기록은 남긴다. 관리자는 이미 판단을
+    # 내렸고, 그 판단까지 없던 일로 만들면 같은 댓글을 또 보게 된다.
+    channel = await db.get(Channel, comment.channel_id)
+    동기화, 메모 = False, payload.note
+    try:
+        if payload.action == "hide":
+            r = await yt.set_moderation(
+                channel.youtube_refresh_token, [comment.youtube_comment_id], yt.HIDE
+            )
+        elif payload.action == "ban_author":
+            r = await yt.ban_author(
+                channel.youtube_refresh_token, comment.youtube_comment_id
+            )
+        elif comment.status == "hidden":  # keep — 숨겼던 것을 되돌린다
+            r = await yt.set_moderation(
+                channel.youtube_refresh_token,
+                [comment.youtube_comment_id],
+                yt.PUBLISH,
+            )
+        else:
+            # 원래 공개돼 있던 걸 [유지] 한 것이라 유튜브에서 할 일이 없다.
+            # youtube_synced 를 True 로 두면 안 된다 — '반영됐다'가 아니라
+            # '반영할 게 없었다'이고, 나중에 이력에서 구분이 안 된다.
+            # 그렇다고 '실패'도 아니라서 메모를 따로 붙이지 않는다.
+            r = None
+
+        if r is not None:
+            동기화 = r.ok
+            if not r.ok:
+                메모 = f"{메모 or ''} [유튜브 반영 실패: {r.detail}]".strip()
+    except yt.NotConnected as e:
+        메모 = f"{메모 or ''} [미연동: {e}]".strip()
+    except Exception as e:  # 유튜브가 죽어도 관리자 판단은 남긴다
+        메모 = f"{메모 or ''} [유튜브 오류: {type(e).__name__}]".strip()
+
     db.add(
         Action(
             comment_id=comment_id,
             action_type=payload.action,
-            actor=payload.actor,
-            note=payload.note,
-            youtube_synced=False,
+            # 조치자는 로그인한 사람이다. 요청 본문으로 받으면 남의 이름으로
+            # 기록을 남길 수 있고, 이력이 증거 구실을 못 하게 된다.
+            actor=user.email,
+            note=메모,
+            youtube_synced=동기화,
             executed_at=now,
         )
     )
@@ -282,7 +315,8 @@ async def act(
         comment_id=comment_id,
         action=payload.action,
         status=comment.status,
-        youtube_synced=False,
+        youtube_synced=동기화,
+        note=메모,
         reviewed_at=now,
     )
 
@@ -291,14 +325,13 @@ async def act(
     "/channels/{channel_id}/stats", response_model=Stats, summary="채널 처리 현황"
 )
 async def stats(
-    channel_id: int,
+    channel: Channel = Depends(require_channel),
     period: Literal["today", "7d", "30d", "all"] = Query(
         "all", description="수집 시각 기준"
     ),
     db: AsyncSession = Depends(get_db),
 ):
-    await _require_channel(db, channel_id)
-
+    channel_id = channel.id
     since = _since(period)
     # 수집 시각 기준이다. 유튜브에 달린 시각이 아니라 우리가 가져온 시각 —
     # 오래된 영상을 오늘 수집하면 오늘 치로 잡히는 게 관리자 관점에 맞다.
@@ -383,7 +416,7 @@ class HistoryItem(BaseModel):
     summary="처리 이력 (누가 언제 무엇을 왜)",
 )
 async def history(
-    channel_id: int,
+    channel: Channel = Depends(require_channel),
     action: Literal["all", "hide", "keep", "ban_author"] = Query("all"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -392,8 +425,7 @@ async def history(
     """조치 이력을 최신순으로. 관리자가 자기 판단을 되짚어볼 수 있어야 하고,
     나중에 이 이력이 채널별 맥락을 만드는 재료가 된다 (F_R_116).
     """
-    await _require_channel(db, channel_id)
-
+    channel_id = channel.id
     latest = _latest_assessment()
     where = [] if action == "all" else [Action.action_type == action]
 
@@ -448,7 +480,7 @@ class SimilarCase(BaseModel):
     summary="과거 유사 사례 (F_R_114)",
 )
 async def similar(
-    comment_id: int,
+    target: Comment = Depends(require_comment),
     limit: int = Query(3, ge=1, le=10),
     # 최소 유사도로 자르지 않는다. 어디서 잘라야 하는지 근거가 아직 없다 —
     # 600건을 재보니 0.8 이상만 확실했고(카테고리 일치 93~97%), 그 아래는
@@ -469,9 +501,7 @@ async def similar(
     같은 채널 안에서만 찾는다. 채널(고객사)간 데이터 결합·비교 노출은
     YouTube API 정책상 금지다.
     """
-    target = await db.get(Comment, comment_id)
-    if target is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"댓글 {comment_id} 없음")
+    comment_id = target.id
     if target.embedding is None:
         # 아직 벡터가 없으면 빈 목록. 화면은 '유사 사례 없음'으로 그리면 된다.
         return []

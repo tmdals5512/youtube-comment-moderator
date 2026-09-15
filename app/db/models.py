@@ -1,10 +1,7 @@
-"""ORM 모델.
+"""ORM 모델."""
 
-MVP① 범위에 필요한 3개만 정의한다.
-나머지 초안 테이블(workspaces, actions 등)은 아직 손대지 않는다.
-"""
-
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 
 from sqlalchemy import (
     Boolean,
@@ -25,16 +22,112 @@ from app.db.base import Base
 # 임베딩 차원. text-embedding-3-small 의 기본값이다.
 EMBEDDING_DIM = 1536
 
+# 로그인 세션 유지 기간.
+SESSION_DAYS = 14
+
+
+class User(Base):
+    """Google 로그인으로 만들어지는 계정.
+
+    비밀번호를 받지 않는다. 유튜브 채널을 붙이려면 어차피 구글 인증이
+    필요해서, 로그인 수단을 따로 두면 계정이 둘로 갈린다.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True)
+    name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # 구글이 주는 고유 식별자(sub). 이메일은 바뀔 수 있어서 이걸 기준으로 찾는다.
+    google_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    picture: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=func.now())
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Workspace(Base):
+    """채널을 담는 단위. 권한과 데이터 격리의 경계다.
+
+    채널을 유저에 직접 매달지 않은 이유는, 한 채널을 여러 관리자가 같이
+    봐야 하기 때문이다. 담당자가 바뀌어도 채널 연동이 유지돼야 한다.
+    """
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    type: Mapped[str] = mapped_column(String(20), default="personal")  # personal / team
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=func.now())
+
+
+class WorkspaceMember(Base):
+    """누가 어느 워크스페이스에 속하는지. 이 표에 없으면 접근이 막힌다."""
+
+    __tablename__ = "workspace_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20), default="member")  # owner / admin / member
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=func.now())
+
+
+class Session(Base):
+    """로그인 세션.
+
+    JWT 가 아니라 DB 에 두는 이유: 계약 종료·연동 해제 시 '즉시' 끊을 수
+    있어야 한다. 서명 토큰은 만료 전까지 회수할 방법이 없다.
+    """
+
+    __tablename__ = "sessions"
+
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    @staticmethod
+    def new(user_id: int, days: int = SESSION_DAYS) -> "Session":
+        now = datetime.utcnow()
+        return Session(
+            # 32바이트 난수. 추측으로 남의 세션을 맞힐 수 없어야 한다.
+            token=secrets.token_urlsafe(32)[:64],
+            user_id=user_id,
+            created_at=now,
+            expires_at=now + timedelta(days=days),
+            last_seen_at=now,
+        )
+
 
 class Channel(Base):
     __tablename__ = "channels"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    workspace_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     youtube_channel_id: Mapped[str] = mapped_column(String(64))
     channel_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # AI 자동 모더레이션에 대한 관리자 명시 동의 (YouTube API 정책).
+    # 동의 없이는 판별을 돌리지 않는다.
     ai_consent_agreed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    ai_consent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     connected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    connected_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+
+    # 채널 소유자의 OAuth 리프레시 토큰. 이게 있어야 댓글을 실제로 가릴 수
+    # 있다(comments.setModerationStatus). 액세스 토큰은 1시간짜리라 저장하지
+    # 않고 필요할 때마다 새로 받는다.
+    #
+    # 연동을 해제하면 반드시 NULL 로 지운다 — 남겨두면 해제한 뒤에도
+    # 그 채널에 쓰기가 가능한 상태가 된다.
+    youtube_refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # 이 채널에서 쓰이는 표현을 LLM 에게 알려주는 문장들.
     # 예: "ㄹㅈㄷ : '레전드'의 초성. 감탄 표현이며 비하가 아니다."
@@ -42,7 +135,20 @@ class Channel(Base):
     # 관리자가 직접 쓰는 게 아니라, 검토 이력에서 패턴을 찾아 시스템이 제안한다.
     context: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # 이 채널이 사람을 안 거치고 바로 가리기로 정한 분류. 콤마로 구분한다.
+    # NULL 또는 빈 문자열이면 자동 숨김 없음 — 새 채널의 기본값이다.
+    # 무엇을 자동으로 가릴지는 채널마다 답이 다르다. '모욕'을 어디까지로
+    # 볼지는 뉴스 채널과 게임 채널이 같을 수 없어서, 값을 코드가 아니라
+    # 채널이 들고 있게 했다.
+    auto_hide_categories: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     rules: Mapped[list["ChannelRule"]] = relationship(back_populates="channel")
+
+    @property
+    def auto_hide_set(self) -> set[str]:
+        """auto_hide_categories 를 집합으로. 미설정이면 빈 집합."""
+        raw = self.auto_hide_categories or ""
+        return {c.strip() for c in raw.split(",") if c.strip()}
 
 
 class ChannelRule(Base):
@@ -90,6 +196,16 @@ class Video(Base):
     title: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     topic: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+
+    # 이 영상에만 해당하는 설명. 판별할 때 프롬프트에 같이 넣는다.
+    #
+    # 채널 맥락과 나눈 이유: 한 채널이 여러 성격의 영상을 올린다. 진용진은
+    # 머니게임도 올리고 길거리 실험도 올린다. "남녀가 팀으로 갈려 싸운다"를
+    # 채널에 박아두면 실험 영상에는 틀린 정보가 들어간다.
+    #
+    # 대개는 비워둬도 된다 — title 만으로도 무슨 영상인지 전달된다.
+    # 머니게임처럼 출연자 구도를 알아야 판단이 되는 영상에만 적는다.
+    context: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # 유튜브가 알려주는 총 댓글 수. 우리가 받은 건수와 비교해야
     # "이 표본이 전체의 몇 %인가"에 답할 수 있다.
@@ -182,6 +298,13 @@ class RiskAssessment(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    # 어떤 기준으로 매긴 판정인지. 프롬프트와 채널 맥락에서 뽑은 지문이다.
+    # 이게 없으면 프롬프트를 고친 뒤 "이 판정은 구기준인가 신기준인가"를
+    # 알 수 없다. 실제로 4,568건이 그렇게 섞여 구분이 불가능했다.
+    prompt_version: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, index=True
+    )
 
     # 규칙에 걸렸으면 무엇에 걸렸는지. 관리자에게 "이 단어 때문"이라고
     # 말해줄 수 있어야 해서 값까지 같이 남긴다.

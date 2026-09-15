@@ -22,7 +22,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from app.services.llm import LlmJudge
+from app.services.llm import LlmJudge, VideoContext
 from app.services.moderation import judge_rules
 
 # 최종 행선지
@@ -31,7 +31,12 @@ QUEUE_JUDGE = "queue_judge"  # 검토 큐 · 판단 필요
 QUEUE_INFO = "queue_info"    # 검토 큐 · 참고 (AI는 정상이라 했지만 검토어가 걸림)
 PASSED = "passed"        # 통과
 
-# 자동 숨김은 비어 있다. 어떤 카테고리도 사람을 안 거치고 가리지 않는다.
+# 자동 숨김의 기본값. 비어 있다 — 채널이 켜기 전에는 어떤 분류도 사람을
+# 안 거치고 가리지 않는다. 채널이 켠 것은 Channel.auto_hide_categories 에
+# 들어가고, route() 에 그 집합을 넘기면 이 기본값 대신 쓰인다.
+#
+# 기본값을 비워둔 이유는 아래와 같다. 관리자가 직접 켜는 것은 별개다 —
+# 그건 채널이 위험을 알고 선택한 것이라 존중한다.
 #
 # 마지막까지 '욕설' 하나는 남겨뒀었다. 대상을 겨냥한 명백한 욕이라면
 # 문맥을 볼 것도 없다고 봤기 때문이다. 실데이터에서 무너졌다.
@@ -80,15 +85,23 @@ class PipelineResult:
         return self.destination in (QUEUE_JUDGE, QUEUE_INFO)
 
 
-def route(label: str, category: str | None, flagged: bool) -> str:
+def route(
+    label: str,
+    category: str | None,
+    flagged: bool,
+    auto_hide: set[str] | None = None,
+) -> str:
     """LLM 판정을 행선지로 옮긴다.
 
     정책(무엇을 자동으로 숨길지)이 이 함수 하나에만 있다. 그래서 정책을
     바꿨을 때 LLM 을 다시 부르지 않고 저장된 판정만으로 재배치할 수 있다
     (scripts/reroute.py). 판정과 정책을 분리해두는 값이 여기서 나온다.
+
+    auto_hide 는 그 채널이 켜둔 분류다. 안 넘기면 기본값(비어 있음)을 쓴다.
     """
+    hide = AUTO_HIDE_CATEGORIES if auto_hide is None else auto_hide
     if label == "harmful":
-        return HIDDEN if category in AUTO_HIDE_CATEGORIES else QUEUE_JUDGE
+        return HIDDEN if category in hide else QUEUE_JUDGE
     # 판별에 실패한 건(빈 label)은 검사받지 않은 댓글이다. 통과시키면
     # 아무도 못 본 채로 공개된다 — 사람이 봐야 한다.
     if label in ("ambiguous", ""):
@@ -102,6 +115,8 @@ async def process(
     judge: LlmJudge,
     text: str,
     parent_text: str | None = None,
+    auto_hide: set[str] | None = None,
+    video: VideoContext | None = None,
 ) -> PipelineResult:
     """댓글 한 건을 파이프라인에 통과시킨다."""
     v = judge_rules(rules, text)
@@ -119,23 +134,31 @@ async def process(
     flagged = v.verdict == "review"
 
     # ③ 등록어에 안 걸린 댓글도 여기로 온다 — 이게 이 설계의 요점
-    r = await judge.judge(text, parent_text=parent_text)
+    r = await judge.judge(text, parent_text=parent_text, video=video)
 
     base = dict(
-        text=text, decided_by="llm", reason=r.reason,
+        text=text, decided_by="llm",
+        # 판별에 실패했으면 그 사유를 남긴다. 안 남기면 DB 에 reason 이 비어
+        # 있어서, 나중에 왜 실패했는지 알아낼 방법이 없다 (실제로 194건을
+        # 그렇게 놓쳤다). 관리자 화면에도 '판별 실패'라고 보여야 한다.
+        reason=r.reason or (f"판별 실패 — {r.error}" if r.error else ""),
         llm_label=r.label, llm_category=r.category,
         rule_value=v.matched_pattern if flagged else None,
         rule_action="review" if flagged else None,
         matched_text=v.matched_text if flagged else None,
     )
 
-    return PipelineResult(destination=route(r.label, r.category, flagged), **base)
+    return PipelineResult(
+        destination=route(r.label, r.category, flagged, auto_hide), **base
+    )
 
 
 async def process_many(
     rules: Sequence,
     judge: LlmJudge,
     items: Sequence[tuple[str, str | None]],
+    auto_hide: set[str] | None = None,
+    videos: Sequence[VideoContext | None] | None = None,
 ) -> list[PipelineResult]:
     """(본문, 부모본문) 목록을 한꺼번에 처리한다.
 
@@ -143,6 +166,12 @@ async def process_many(
     """
     import asyncio
 
+    vs = list(videos) if videos else [None] * len(items)
     return list(
-        await asyncio.gather(*(process(rules, judge, t, p) for t, p in items))
+        await asyncio.gather(
+            *(
+                process(rules, judge, t, p, auto_hide, v)
+                for (t, p), v in zip(items, vs)
+            )
+        )
     )

@@ -24,20 +24,22 @@ from sqlalchemy import select
 from sqlalchemy import text as sq
 
 from app.core.config import get_settings
-from app.db.models import ChannelRule
+from app.db.models import Channel, ChannelRule
 from app.db.session import AsyncSessionLocal, engine
-from app.services.llm import LlmJudge
+from app.services.llm import LlmJudge, VideoContext
 from app.services.pipeline import process
 from app.services.store import save_results
 
 CR = chr(13)   # 같은 줄에 덮어쓰기 위한 캐리지리턴
 
 SQL = """
-SELECT c.id, c.content, p.content AS parent, ra.category
+SELECT c.id, c.content, p.content AS parent, ra.category,
+       v.title AS v_title, v.context AS v_memo
 FROM comments c
 JOIN risk_assessments ra
   ON ra.id = (SELECT max(id) FROM risk_assessments WHERE comment_id = c.id)
 LEFT JOIN comments p ON p.youtube_comment_id = c.parent_comment_id
+LEFT JOIN videos v ON v.video_id = c.video_id
 WHERE c.channel_id = :cid {cond}
 ORDER BY c.id
 """
@@ -67,6 +69,12 @@ async def main() -> None:
                 )
             )
         ).scalars().all()
+        # 채널 맥락과 자동 숨김 설정. run_pipeline·watch 와 같은 기준으로
+        # 돌아야 재판별 결과를 평소 판정과 견줄 수 있다.
+        ch = await db.get(Channel, args.channel)
+        if ch is None:
+            raise SystemExit(f"[FAIL] 채널 {args.channel} 이 없다.")
+        ctx, auto_hide = ch.context or "", ch.auto_hide_set
 
     if not rows:
         raise SystemExit("다시 돌릴 댓글이 없다.")
@@ -74,20 +82,24 @@ async def main() -> None:
     before = collections.Counter(r[3] or "(없음)" for r in rows)
     print(f"대상 {len(rows)}건 · 등록어 {len(rules)}개")
     print("  전: " + " · ".join(f"{k} {v}" for k, v in before.most_common(8)))
+    print("  채널 맥락: " + (f"{len(ctx)}자" if ctx else "없음"))
+    print("  자동 숨김: " + (" · ".join(sorted(auto_hide)) or "없음 (전부 검토 큐로)"))
     print(f"  예상 비용 약 {len(rows) * 0.177:.0f}원")
 
     if args.dry:
         await engine.dispose()
         return
 
-    judge = LlmJudge(concurrency=8, max_calls=len(rows) + 10)
+    judge = LlmJudge(
+        concurrency=8, max_calls=len(rows) + 10, channel_context=ctx
+    )
 
     total = len(rows)
     done = 0
 
-    async def one(text, parent):
+    async def one(text, parent, video):
         nonlocal done
-        r = await process(rules, judge, text, parent)
+        r = await process(rules, judge, text, parent, auto_hide, video)
         done += 1
         if done % 10 == 0 or done == total:
             pct = done / total
@@ -96,7 +108,9 @@ async def main() -> None:
                   f"{judge.stats.cost_usd * 1400:.0f}원", end="", flush=True)
         return r
 
-    res = list(await asyncio.gather(*(one(r[1], r[2]) for r in rows)))
+    res = list(await asyncio.gather(*(
+        one(r[1], r[2], VideoContext(title=r[4], memo=r[5])) for r in rows
+    )))
     print()
 
     async with AsyncSessionLocal() as db:
@@ -104,6 +118,7 @@ async def main() -> None:
             db,
             [(r[0], v) for r, v in zip(rows, res)],
             model=get_settings().openai_model,
+            prompt_version=judge.prompt_version,
         )
 
     after = collections.Counter(v.llm_category or "(실패)" for v in res)

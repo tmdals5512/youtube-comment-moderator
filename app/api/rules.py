@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Channel, ChannelRule
+from app.core.deps import require_channel
 from app.db.session import get_db
 from app.schemas import RuleCreate, RuleOut, RuleUpdate
 from app.services.pattern import expand
@@ -12,16 +13,11 @@ from app.services.pattern import expand
 router = APIRouter(prefix="/channels/{channel_id}/rules", tags=["rules"])
 
 
-async def _get_channel(db: AsyncSession, channel_id: int) -> Channel:
-    channel = await db.get(Channel, channel_id)
-    if channel is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"채널 {channel_id} 없음")
-    return channel
-
-
 @router.get("", response_model=list[RuleOut], summary="등록된 단어 목록")
-async def list_rules(channel_id: int, db: AsyncSession = Depends(get_db)):
-    await _get_channel(db, channel_id)
+async def list_rules(
+    channel: Channel = Depends(require_channel), db: AsyncSession = Depends(get_db)
+):
+    channel_id = channel.id
     result = await db.execute(
         select(ChannelRule)
         .where(ChannelRule.channel_id == channel_id)
@@ -34,9 +30,11 @@ async def list_rules(channel_id: int, db: AsyncSession = Depends(get_db)):
     "", response_model=RuleOut, status_code=status.HTTP_201_CREATED, summary="단어 등록"
 )
 async def create_rule(
-    channel_id: int, payload: RuleCreate, db: AsyncSession = Depends(get_db)
+    payload: RuleCreate,
+    channel: Channel = Depends(require_channel),
+    db: AsyncSession = Depends(get_db),
 ):
-    await _get_channel(db, channel_id)
+    channel_id = channel.id
 
     rule = ChannelRule(
         channel_id=channel_id,
@@ -56,13 +54,13 @@ async def create_rule(
 
 @router.patch("/{rule_id}", response_model=RuleOut, summary="단어 수정")
 async def update_rule(
-    channel_id: int,
     rule_id: int,
     payload: RuleUpdate,
+    channel: Channel = Depends(require_channel),
     db: AsyncSession = Depends(get_db),
 ):
     rule = await db.get(ChannelRule, rule_id)
-    if rule is None or rule.channel_id != channel_id:
+    if rule is None or rule.channel_id != channel.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"규칙 {rule_id} 없음")
 
     if payload.action is not None:
@@ -82,9 +80,13 @@ async def update_rule(
 @router.delete(
     "/{rule_id}", status_code=status.HTTP_204_NO_CONTENT, summary="단어 삭제"
 )
-async def delete_rule(channel_id: int, rule_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_rule(
+    rule_id: int,
+    channel: Channel = Depends(require_channel),
+    db: AsyncSession = Depends(get_db),
+):
     rule = await db.get(ChannelRule, rule_id)
-    if rule is None or rule.channel_id != channel_id:
+    if rule is None or rule.channel_id != channel.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"규칙 {rule_id} 없음")
     await db.delete(rule)
     await db.commit()

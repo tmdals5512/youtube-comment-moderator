@@ -18,11 +18,19 @@
 """
 
 import asyncio
+import hashlib
 import json
+import random
 import re
 from dataclasses import dataclass, field
 
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    RateLimitError,
+)
 
 from app.core.config import get_settings
 
@@ -223,6 +231,20 @@ def build_prompt(channel_context: str = "") -> str:
     return f"{PRINCIPLES}\n{EXAMPLES}\n\n[이 채널의 맥락]\n{tail}"
 
 
+def prompt_version(channel_context: str = "") -> str:
+    """이 판정이 어떤 기준으로 매겨졌는지 나타내는 지문.
+
+    사람이 "v3 으로 올려야지" 하고 기억할 필요가 없게 내용에서 뽑는다.
+    프롬프트를 한 글자라도 고치면 값이 달라지고, 채널 맥락을 바꿔도 달라진다.
+
+    이게 없던 탓에 채널 4 의 판정 4,568건 중 어느 것이 구 프롬프트 기준이고
+    어느 것이 신 기준인지 구분할 수 없었다. 날짜로 짐작할 수는 있었지만
+    같은 날 프롬프트를 두 번 고치면 그마저 안 된다.
+    """
+    h = hashlib.sha256(build_prompt(channel_context).encode("utf-8"))
+    return h.hexdigest()[:12]
+
+
 SYSTEM_PROMPT = build_prompt()
 
 SCHEMA = {
@@ -245,6 +267,10 @@ SCHEMA = {
     },
 }
 
+# 다시 걸면 되는 오류들. 정원 초과·네트워크·서버 일시 장애.
+RETRYABLE = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
+RETRIES = 5
+
 # label -> 파이프라인 처리 (숨김 / 관리자 검토 / 통과)
 VERDICT = {"harmful": "block", "ambiguous": "review", "safe": "pass"}
 
@@ -254,6 +280,28 @@ MENTION = re.compile(r"@[\w가-힣._-]{2,}")
 
 def sanitize(text: str) -> str:
     return MENTION.sub("@사용자", text).strip()
+
+
+@dataclass(frozen=True)
+class VideoContext:
+    """댓글이 달린 영상. 판별할 때 같이 보낸다.
+
+    제목만으로도 꽤 전달된다 — "머니게임 Ep5" 한 줄이면 무슨 방송인지 안다.
+    memo 는 그것만으로 부족한 영상에만 채운다(출연자 구도 같은 것).
+    """
+
+    title: str | None = None
+    memo: str | None = None
+
+    def as_prompt(self) -> str:
+        # 공백만 든 값은 없는 것으로 본다. DB 에서 빈 문자열이 올라오면
+        # "[이 영상] 제목:" 같은 빈 껍데기가 프롬프트에 섞인다.
+        줄 = []
+        if (t := (self.title or "").strip()):
+            줄.append(f"제목: {t}")
+        if (m := (self.memo or "").strip()):
+            줄.append(m)
+        return "[이 영상] " + " / ".join(줄) if 줄 else ""
 
 
 @dataclass
@@ -270,6 +318,7 @@ class LlmVerdict:
 class LlmStats:
     calls: int = 0
     errors: int = 0
+    retries: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
@@ -305,13 +354,25 @@ class LlmJudge:
         self._sem = asyncio.Semaphore(concurrency)
         self._max_calls = max_calls or cfg.llm_max_calls_per_run
         self._prompt = build_prompt(channel_context)
+        # 이 판정들이 어떤 기준으로 매겨졌는지. 저장할 때 같이 남긴다.
+        self.prompt_version = prompt_version(channel_context)
         self.stats = LlmStats()
 
-    async def judge(self, text: str, parent_text: str | None = None) -> LlmVerdict:
-        """parent_text 는 답글일 때 부모 댓글.
+    async def judge(
+        self,
+        text: str,
+        parent_text: str | None = None,
+        video: "VideoContext | None" = None,
+    ) -> LlmVerdict:
+        """parent_text 는 답글일 때 부모 댓글, video 는 그 댓글이 달린 영상.
 
         "그만해라 진짜" 한 줄만 보면 사람도 판단 못 한다. 무엇에 대한 답인지에
         따라 말리는 쪽일 수도 편드는 쪽일 수도 있어서, 답글은 부모를 같이 보낸다.
+
+        영상 정보를 시스템 프롬프트가 아니라 여기(사용자 메시지)에 넣는 이유는
+        캐싱 때문이다. 시스템 프롬프트는 채널이 같으면 늘 똑같아야 앞부분이
+        캐시에서 재사용된다(1/10 값). 영상은 댓글마다 달라서, 시스템 쪽에
+        넣으면 영상이 바뀔 때마다 캐시가 깨진다.
         """
         if self.stats.calls >= self._max_calls:
             return LlmVerdict("review", error="호출 상한 도달")
@@ -319,27 +380,51 @@ class LlmJudge:
         user = sanitize(text)
         if parent_text:
             user = f"[부모 댓글] {sanitize(parent_text)}\n[판단할 댓글] {user}"
+        if video and (head := video.as_prompt()):
+            user = f"{head}\n{user}"
 
         async with self._sem:
             self.stats.calls += 1
-            try:
-                r = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": self._prompt},
-                        {"role": "user", "content": user},
-                    ],
-                    response_format={"type": "json_schema", "json_schema": SCHEMA},
-                    reasoning_effort="low",
-                    # 이 한도에는 추론 토큰이 포함된다. 250 으로 뒀더니
-                    # 어려운 댓글에서 추론만 하다 한도에 걸려(finish_reason=length)
-                    # 본문이 빈 문자열로 왔다 — 4,567건 중 895건(19.6%)이 그랬다.
-                    # 실측 추론 토큰이 160~250 이라 넉넉히 잡는다. 안 쓰면 청구도 안 된다.
-                    max_completion_tokens=800,
-                )
-            except Exception as e:  # 한 건 실패가 전체를 멈추지 않게 한다
+            r = None
+            last: Exception | None = None
+
+            # 레이트리밋·타임아웃·5xx 는 다시 걸면 대개 된다. 재시도가 없으면
+            # 1,103건을 동시 8개로 돌릴 때 194건(17.6%)이 통째로 실패했다.
+            # 그렇게 실패한 건은 label 이 비어 검토 큐로 가는데, 관리자에게는
+            # 근거 없는 댓글이 무더기로 쌓인 것으로 보인다.
+            for attempt in range(RETRIES):
+                try:
+                    r = await self._client.chat.completions.create(
+                        model=self._model,
+                        messages=[
+                            {"role": "system", "content": self._prompt},
+                            {"role": "user", "content": user},
+                        ],
+                        response_format={"type": "json_schema", "json_schema": SCHEMA},
+                        reasoning_effort="low",
+                        # 이 한도에는 추론 토큰이 포함된다. 250 으로 뒀더니
+                        # 어려운 댓글에서 추론만 하다 한도에 걸려(finish_reason=length)
+                        # 본문이 빈 문자열로 왔다 — 4,567건 중 895건(19.6%)이 그랬다.
+                        # 실측 추론 토큰이 160~250 이라 넉넉히 잡는다. 안 쓰면 청구도 안 된다.
+                        max_completion_tokens=800,
+                    )
+                    break
+                except RETRYABLE as e:
+                    last = e
+                    self.stats.retries += 1
+                    if attempt == RETRIES - 1:
+                        break
+                    # 2, 4, 8 … 초. 같은 순간에 몰려 다시 막히지 않게 흔들어준다.
+                    await asyncio.sleep(min(2 ** (attempt + 1), 30) * (1 + random.random() * 0.3))
+                except Exception as e:  # 다시 걸어도 소용없는 것 (잘못된 요청 등)
+                    last = e
+                    break
+
+            if r is None:
                 self.stats.errors += 1
-                return LlmVerdict("review", error=f"{type(e).__name__}: {e}"[:160])
+                return LlmVerdict(
+                    "review", error=f"{type(last).__name__}: {last}"[:160]
+                )
 
         u = r.usage
         cached = getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0) or 0

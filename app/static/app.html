@@ -25,6 +25,12 @@
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
     대시보드
   </a>
+  <!-- 채널 관리는 아직 온보딩 목업 화면이다. 목업 사이드바에는 이 항목이
+       있는데 여기에 없으면, 목업에서 넘어온 사람이 돌아갈 길을 잃는다. -->
+  <a class="nav-item" href="#/channels" title="연동된 채널 관리">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9.5l5 2.5-5 2.5z" fill="currentColor" stroke="none"/></svg>
+    채널 관리
+  </a>
   <a class="nav-item" href="#/queue">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
     검토 큐 <b id="badge"></b>
@@ -48,11 +54,11 @@
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
     처음부터
   </a>
-  <div class="me">
-    <div class="av">박</div>
+  <div class="me" id="me">
+    <div class="av" id="me-av">·</div>
     <div>
-      <div class="n">박승민</div>
-      <div class="t">Outlier 팀</div>
+      <div class="n" id="me-name">불러오는 중</div>
+      <div class="t" id="me-ws">&nbsp;</div>
     </div>
   </div>
 </aside>

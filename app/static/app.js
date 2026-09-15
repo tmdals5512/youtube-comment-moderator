@@ -32,11 +32,35 @@ async function api(path, opts) {
     headers: { "Content-Type": "application/json" },
     ...opts,
   });
+  if (r.status === 401) {
+    // 자동으로 넘기지 않는다. 로그인이 실패하면 튕겨 나왔다가 다시 보내지는
+    // 무한 왕복이 되고, 그러면 원인이 뭔지 볼 기회가 없다.
+    showLogin();
+    const e = new Error("로그인이 필요합니다");
+    e.unauthorized = true;   // route() 가 오류 화면으로 덮지 않게 표시해둔다
+    throw e;
+  }
   if (!r.ok) {
     const body = await r.text();
     throw new Error(`${r.status} ${body.slice(0, 200)}`);
   }
   return r.status === 204 ? null : r.json();
+}
+
+function showLogin() {
+  stopRefresh();
+  view.innerHTML = `
+    <div class="empty" style="padding:60px 20px;text-align:center">
+      <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:8px">
+        로그인이 필요합니다</div>
+      <div style="margin-bottom:20px">채널 데이터는 로그인한 사람에게만 보입니다.</div>
+      <button id="login" style="flex:0 0 auto;padding:10px 30px">로그인</button>
+    </div>`;
+  $("#login").onclick = () => {
+    location.href =
+      "/api/auth/start?next=" +
+      encodeURIComponent(location.pathname + location.hash);
+  };
 }
 
 /** 화면에 넣기 전에 반드시 통과시킨다. 댓글 본문은 남이 쓴 글이라 그대로
@@ -299,11 +323,37 @@ async function act(id, action) {
   refreshBadge();
 }
 
+// 한 번에 받아오는 건수. API 상한(200)과 같다.
+const PAGE = 200;
+
+// 지금 보고 있는 목록의 종류. '더 불러오기'가 같은 목록을 이어받아야 해서
+// viewList 가 정해둔 값을 loadMore 와 자동갱신이 함께 쓴다.
+let listKind = "queue";
+const listPath = () =>
+  `/channels/${channelId()}/${listKind}?limit=${PAGE}`;
+
+// 서버에 남아 있는 전체 건수. 받아온 것보다 많을 수 있어서 따로 들고 있는다.
+// 이 값이 없으면 화면이 "200건"이라고 말하는데, 실제로는 1,098건 중
+// 200건만 받은 것이라 관리자가 다 봤다고 착각한다.
+let total = 0;
+
 function paint() {
+  const more = Math.max(total - rows.length, 0);
+
   $("#list").innerHTML = rows.length
-    ? rows.map((x) => renderItem(x, selected?.comment_id)).join("")
+    ? rows.map((x) => renderItem(x, selected?.comment_id)).join("") +
+      (more
+        ? `<div style="padding:14px;text-align:center;border-top:1px solid var(--line-soft)">
+             <button class="slim" id="more">${num(Math.min(more, PAGE))}건 더 불러오기</button>
+             <div style="font-size:11.5px;color:var(--muted);margin-top:7px">남은 ${num(more)}건</div>
+           </div>`
+        : "")
     : `<div class="empty">비어 있습니다.</div>`;
-  $("#count").textContent = `${num(rows.length)}건`;
+
+  // 받은 것과 전체가 다르면 둘 다 보여준다. 같으면 전체만.
+  $("#count").textContent =
+    more > 0 ? `${num(total)}건 중 ${num(rows.length)}건 표시` : `${num(rows.length)}건`;
+
   $("#list")
     .querySelectorAll(".item")
     .forEach((el) => {
@@ -312,16 +362,42 @@ function paint() {
         paint();
       };
     });
+
+  const btn = $("#more");
+  if (btn) btn.onclick = () => loadMore(btn);
+
   renderDetail(selected);
+}
+
+async function loadMore(btn) {
+  btn.disabled = true;
+  btn.textContent = "불러오는 중…";
+  try {
+    const next = await api(`${listPath()}&offset=${rows.length}`);
+    // 이미 있는 건 빼고 붙인다. 그 사이 판정이 바뀌면 겹칠 수 있다.
+    const known = new Set(rows.map((r) => r.comment_id));
+    rows = rows.concat(next.filter((r) => !known.has(r.comment_id)));
+    paint();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "다시 시도";
+    toast(`불러오지 못했습니다: ${e.message}`);
+  }
 }
 
 async function viewList(kind) {
   loading();
   const isQueue = kind === "queue";
-  const path = isQueue
-    ? `/channels/${channelId()}/queue?limit=200`
-    : `/channels/${channelId()}/hidden?limit=200`;
-  rows = await api(path);
+  listKind = isQueue ? "queue" : "hidden";
+
+  // 목록과 전체 건수를 같이 받는다. 목록만 받으면 상한(200)에 걸린 건지
+  // 정말 그게 전부인지 구분할 수 없다.
+  const [list, stats] = await Promise.all([
+    api(listPath()),
+    api(`/channels/${channelId()}/stats?period=all`).catch(() => null),
+  ]);
+  rows = list;
+  total = stats ? (isQueue ? stats.unreviewed : stats.hidden) : rows.length;
   selected = rows[0] || null;
 
   view.innerHTML = `
@@ -347,9 +423,41 @@ async function viewList(kind) {
 
 const ACTION_KO = { block: "차단", review: "검토", allow: "예외" };
 
+// 토글 한 줄. 켜짐/꺼짐이 색만이 아니라 위치로도 드러나야 한다 —
+// 되돌릴 수 없는 조치를 켜는 스위치라 상태를 잘못 읽으면 곤란하다.
+function autoHideRows(options) {
+  return options
+    .map(
+      (o) => `
+      <div class="ah" data-name="${esc(o.name)}" role="switch" tabindex="0"
+           aria-checked="${o.enabled}"
+           style="display:flex;align-items:center;gap:10px;padding:8px 0;
+                  border-bottom:1px solid var(--line-soft);cursor:pointer">
+        <div style="flex:1;font-size:13px;color:${o.enabled ? "var(--text)" : "var(--muted)"}">
+          ${esc(o.name)}<span style="color:#b4b4c0;font-size:11px;margin-left:6px">${esc(
+            o.description
+          )}</span></div>
+        <div style="width:34px;height:19px;border-radius:11px;background:${
+          o.enabled ? "var(--accent)" : "#dcdce4"
+        };position:relative;transition:background .15s">
+          <i style="position:absolute;top:2px;${
+            o.enabled ? "right:2px" : "left:2px"
+          };width:15px;height:15px;border-radius:50%;background:#fff;display:block"></i></div>
+      </div>`
+    )
+    .join("");
+}
+
 async function viewRules() {
   loading();
-  const list = await api(`/channels/${channelId()}/rules`);
+  // 자동 숨김 설정은 없어도 나머지는 보여준다. 한쪽이 실패했다고 등록어
+  // 목록까지 같이 사라지면, 화면이 왜 안 뜨는지 알 수 없게 된다.
+  // (서버가 옛 코드로 떠 있으면 이 엔드포인트만 404 가 난다)
+  const [list, auto, ctx] = await Promise.all([
+    api(`/channels/${channelId()}/rules`),
+    api(`/channels/${channelId()}/auto-hide`).catch(() => null),
+    api(`/channels/${channelId()}/context`).catch(() => null),
+  ]);
 
   view.innerHTML = `
     <h1>관리 기준</h1>
@@ -386,38 +494,51 @@ async function viewRules() {
       </div>
 
       <div class="card">
+        <h2>이 채널의 판단 기준</h2>
+        <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px">
+          여기 적은 내용이 AI 판별에 함께 전달됩니다.
+          <b>영상이 바뀌어도 그대로인 것</b>만 적으세요 —
+          특정 영상 설명은 그 영상에 따로 답니다.
+        </div>
+        ${
+          ctx
+            ? `<textarea id="ctx" rows="9" placeholder="예)
+우리 채널에서 'ㄹㅈㄷ'는 '레전드'의 초성으로 칭찬 표현이다.
+출연자의 행동·판단을 평하는 것은 정상이다.
+다만 외모·지능을 깎아내리는 것은 모욕이다."
+              style="width:100%;box-sizing:border-box;padding:11px 13px;
+                     border:1px solid var(--line);border-radius:9px;
+                     font:13px/1.65 inherit;resize:vertical"
+              >${esc(ctx.context)}</textarea>
+             <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+               <span id="ctxinfo" style="flex:1;font-size:11.5px;color:var(--muted)">
+                 판정 지문 ${esc(ctx.prompt_version)}</span>
+               <button class="slim" id="ctxsave" style="flex:0 0 auto">저장</button>
+             </div>`
+            : `<div class="empty" style="padding:18px">불러오지 못했습니다.
+                 서버를 재시작해보세요.</div>`
+        }
+        <div class="note" style="margin-top:14px">바꾼 기준은 <b>다음 판별부터</b>
+          적용됩니다. 이미 판별한 댓글은 그대로 둡니다 — 기준을 고칠 때마다
+          수천 건이 자동으로 다시 돌면 비용을 예측할 수 없기 때문입니다.</div>
+      </div>
+
+      <div class="card">
         <h2>자동 숨김 대상</h2>
         <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px">
           여기 켜진 분류만 관리자 확인 없이 바로 가려집니다. 나머지는 전부 검토 큐로 옵니다.
         </div>
-        ${[
-          ["욕설", "대상을 겨냥한 욕설", true],
-          ["신상털기", "실명·주소·연락처 노출", false],
-          ["위협", "신체적 위해 암시", false],
-          ["자해", "자해·자살 관련", false],
-          ["혐오", "지역·성별·국적 비하", false],
-          ["성희롱", "성적 대상화", false],
-          ["모욕", "인신공격·조롱", false],
-          ["괴롭힘", "반복적 시달림", false],
-          ["스팸", "홍보·링크 도배", false],
-        ]
-          .map(
-            ([n, d, on]) => `
-          <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line-soft)">
-            <div style="flex:1;font-size:13px;color:${on ? "var(--text)" : "var(--muted)"}">
-              ${n}<span style="color:#b4b4c0;font-size:11px;margin-left:6px">${d}</span></div>
-            <div style="width:34px;height:19px;border-radius:11px;background:${
-              on ? "var(--accent)" : "#dcdce4"
-            };position:relative">
-              <i style="position:absolute;top:2px;${
-                on ? "right:2px" : "left:2px"
-              };width:15px;height:15px;border-radius:50%;background:#fff;display:block"></i></div>
-          </div>`
-          )
-          .join("")}
-        <div class="note" style="margin-top:14px">자동 숨김은 되돌릴 기회가 없어 기본값을
-          <b>욕설 하나</b>로 두었습니다. 판단이 갈리는 분류(모욕·혐오 등)는 채널이 직접 정하도록
-          검토 큐로 보냅니다.</div>
+        <div id="autohide">${
+          auto
+            ? autoHideRows(auto.options)
+            : `<div class="empty" style="padding:18px">설정을 불러오지 못했습니다.
+                 서버가 옛 코드로 떠 있을 수 있어요 — 재시작하면 됩니다.</div>`
+        }</div>
+        <div class="note" style="margin-top:14px">자동 숨김은 되돌릴 기회가 없어 기본값은
+          <b>전부 꺼짐</b>입니다. 켜면 그 분류는 관리자가 보기 전에 가려지므로,
+          숨김 목록을 주기적으로 확인해 주세요.<br>
+          바꾼 설정은 <b>다음 판별부터</b> 적용됩니다. 이미 판별된 댓글은 그대로 둡니다 —
+          누르자마자 예전 댓글이 무더기로 사라지지 않게 하기 위해서입니다.</div>
       </div>
     </div>`;
 
@@ -442,6 +563,81 @@ async function viewRules() {
       viewRules();
     };
   });
+
+  // 채널 기준 저장. 저장하면 판정 지문이 바뀌는데, 그게 바뀌었다는 건
+  // "이제부터 다른 기준으로 판정된다"는 뜻이라 화면에 같이 보여준다.
+  if (ctx) {
+    const box = $("#ctx");
+    const info = $("#ctxinfo");
+    const btn = $("#ctxsave");
+    const before = ctx.prompt_version;
+
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = "저장 중…";
+      try {
+        const next = await api(`/channels/${channelId()}/context`, {
+          method: "PUT",
+          body: JSON.stringify({ context: box.value }),
+        });
+        info.textContent =
+          next.prompt_version === before
+            ? `판정 지문 ${next.prompt_version} (그대로)`
+            : `판정 지문 ${before} → ${next.prompt_version} · 다음 판별부터 적용`;
+        toast("기준을 저장했습니다");
+      } catch (e) {
+        toast(`저장하지 못했습니다: ${e.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "저장";
+      }
+    };
+  }
+
+  // 자동 숨김 토글. 화면의 현재 상태를 그대로 읽어 보내므로, 연달아 눌러도
+  // 마지막 상태가 저장된다. 서버 응답으로 다시 그려 화면과 DB 를 맞춘다.
+  let saving = false;
+  const box = $("#autohide");
+  if (!auto) return;   // 설정을 못 불러왔으면 토글도 없다
+  const toggle = async (row) => {
+    if (saving) return;
+    const name = row.dataset.name;
+    const turningOn = row.getAttribute("aria-checked") !== "true";
+    const on = [...box.querySelectorAll(".ah")]
+      .filter((r) =>
+        r === row ? turningOn : r.getAttribute("aria-checked") === "true"
+      )
+      .map((r) => r.dataset.name);
+
+    saving = true;
+    try {
+      const next = await api(`/channels/${channelId()}/auto-hide`, {
+        method: "PUT",
+        body: JSON.stringify({ categories: on }),
+      });
+      box.innerHTML = autoHideRows(next.options);
+      bindAutoHide();
+      toast(
+        turningOn
+          ? `'${name}'은 이제 관리자 확인 없이 가려집니다`
+          : `'${name}'은 검토 큐로 옵니다`
+      );
+    } finally {
+      saving = false;
+    }
+  };
+  const bindAutoHide = () => {
+    box.querySelectorAll(".ah").forEach((row) => {
+      row.onclick = () => toggle(row);
+      row.onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          toggle(row);
+        }
+      };
+    });
+  };
+  bindAutoHide();
 }
 
 // ── 처리 이력 ─────────────────────────────────────────
@@ -515,18 +711,22 @@ function startRefresh(kind) {
   refreshTimer = setInterval(async () => {
     if (document.hidden) return;                 // 보고 있지 않으면 쉰다
     try {
-      const path =
-        kind === "queue"
-          ? `/channels/${channelId()}/queue?limit=200`
-          : `/channels/${channelId()}/hidden?limit=200`;
-      const fresh = await api(path);
+      const fresh = await api(listPath());
       const known = new Set(rows.map((r) => r.comment_id));
       const added = fresh.filter((r) => !known.has(r.comment_id));
-      if (!added.length) return;
 
-      // 보고 있던 댓글은 유지한 채 새 것만 얹는다.
+      // 전체 건수는 새 댓글이 없어도 움직인다 (다른 관리자가 처리했을 수 있다).
+      const stats = await api(`/channels/${channelId()}/stats?period=all`).catch(
+        () => null
+      );
+      if (stats) total = kind === "queue" ? stats.unreviewed : stats.hidden;
+
+      if (!added.length) return paint();
+
+      // '더 불러오기'로 받아둔 뒷장을 버리지 않는다. 첫 장만 다시 받았으므로
+      // 새로 온 것만 앞에 얹고 나머지는 그대로 둔다.
       const keep = selected?.comment_id;
-      rows = fresh;
+      rows = added.concat(rows);
       selected = rows.find((r) => r.comment_id === keep) || rows[0] || null;
       paint();
       toast(`새 댓글 ${added.length}건이 들어왔습니다`);
@@ -538,8 +738,108 @@ function startRefresh(kind) {
 
 // ── 라우팅 ────────────────────────────────────────────
 
+// ── 채널 관리 ─────────────────────────────────────────
+
+const 연동오류 = {
+  cancelled: "연동을 취소하셨습니다.",
+  access_denied:
+    "구글에서 거부됐습니다. 미검증 앱이라 '테스트 사용자'에 등록된 계정만 됩니다.",
+  no_refresh_token:
+    "이미 허용해둔 계정이라 권한을 새로 못 받았습니다. " +
+    "구글 계정 설정 > 보안 > 서드파티 앱에서 Outlier 접근을 지운 뒤 다시 해주세요.",
+  no_channel: "이 계정에 유튜브 채널이 없습니다.",
+};
+
+async function viewChannels() {
+  loading();
+  const list = await api("/channels");
+
+  // 연동 후 돌아오면 ?connected=1 이나 ?error=... 가 붙어 온다
+  const q = new URLSearchParams(location.hash.split("?")[1] || "");
+  const 알림 = q.get("connected")
+    ? `<div class="note" style="margin-bottom:14px">
+         채널 ${esc(q.get("connected"))}개를 연결했습니다. 이제 숨김이 유튜브에 반영됩니다.</div>`
+    : q.get("error")
+      ? `<div class="note" style="margin-bottom:14px;border-color:var(--critical)">
+           ${esc(연동오류[q.get("error")] || q.get("error"))}</div>`
+      : "";
+
+  view.innerHTML = `
+    <h1>채널 관리</h1>
+    <div class="sub">연동한 채널만 댓글을 수집하고 조치할 수 있습니다</div>
+    ${알림}
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;
+                  margin-bottom:14px">
+        <h2 style="margin:0">연동된 채널 ${list.length}개</h2>
+        <button class="slim" id="connect" style="flex:0 0 auto">+ 채널 연결</button>
+      </div>
+      <div id="chlist"></div>
+      <div class="note" style="margin-top:16px">연결할 때 구글이 'YouTube 관리' 권한을
+        물어봅니다. 그 권한이 있어야 <b>숨김이 실제 유튜브에 반영</b>됩니다.
+        권한 없이도 댓글 수집과 판별은 되지만, 조치는 우리 기록에만 남습니다.</div>
+    </div>`;
+
+  $("#connect").onclick = () => (location.href = "/api/channels/connect/start");
+
+  // 채널별 연동 상태는 따로 물어본다 (목록 API 는 가벼워야 한다)
+  const 상태 = await Promise.all(
+    list.map((c) =>
+      api(`/channels/${c.id}/context`)
+        .then(() => ({ ...c, ok: true }))
+        .catch(() => ({ ...c, ok: false }))
+    )
+  );
+
+  $("#chlist").innerHTML = 상태.length
+    ? 상태
+        .map(
+          (c) => `
+      <div style="display:flex;align-items:center;gap:12px;padding:12px 0;
+                  border-bottom:1px solid var(--line-soft)">
+        <div style="flex:1">
+          <div style="font-size:14px;font-weight:600">${esc(c.channel_title)}</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:3px">
+            채널 #${c.id}</div>
+        </div>
+        <button class="slim danger" data-off="${c.id}"
+                style="flex:0 0 auto">연동 해제</button>
+      </div>`
+        )
+        .join("")
+    : `<div class="empty" style="padding:24px">연동된 채널이 없습니다.<br>
+         위 [+ 채널 연결]로 시작하세요.</div>`;
+
+  view.querySelectorAll("[data-off]").forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm("연동을 해제하면 이 채널의 조치 권한이 사라집니다. 계속할까요?"))
+        return;
+      await api(`/channels/${b.dataset.off}/disconnect`, { method: "POST" });
+      toast("연동을 해제했습니다");
+      await loadChannels();
+      viewChannels();
+    };
+  });
+}
+
+// ── 로그인한 사람 ─────────────────────────────────────
+
+async function showMe() {
+  try {
+    const me = await api("/auth/me");
+    const 이름 = me.name || me.email.split("@")[0];
+    $("#me-name").textContent = 이름;
+    $("#me-ws").textContent = me.workspace_name;
+    $("#me-av").textContent = 이름.slice(0, 1);
+    $("#me").title = me.email;
+  } catch {
+    /* 로그인 전이면 그냥 둔다 — api() 가 이미 안내 화면을 그린다 */
+  }
+}
+
 const ROUTES = {
   "#/dashboard": viewDashboard,
+  "#/channels": viewChannels,
   "#/queue": () => viewList("queue"),
   "#/hidden": () => viewList("hidden"),
   "#/rules": viewRules,
@@ -547,8 +847,11 @@ const ROUTES = {
 };
 
 async function route() {
-  const hash = ROUTES[location.hash] ? location.hash : "#/queue";
-  if (location.hash !== hash) return (location.hash = hash);
+  // 연동에서 돌아오면 '#/channels?connected=1' 처럼 뒤에 값이 붙는다.
+  // 앞부분만 떼어 경로를 고른다.
+  const base = location.hash.split("?")[0];
+  const hash = ROUTES[base] ? base : "#/queue";
+  if (base !== hash) return (location.hash = hash);
   document.querySelectorAll(".nav-item").forEach((a) => {
     a.classList.toggle("on", a.getAttribute("href") === hash);
   });
@@ -556,7 +859,8 @@ async function route() {
   try {
     await ROUTES[hash]();
   } catch (e) {
-    failed(e);
+    // 401 은 api() 가 이미 로그인 안내를 그려뒀다. 덮어쓰면 안 된다.
+    if (!e.unauthorized) failed(e);
   }
   refreshBadge();
 }
@@ -565,12 +869,15 @@ async function route() {
   try {
     await loadChannels();
   } catch (e) {
-    return failed(e);
+    // 로그인 전이면 채널 목록부터 401 이 난다. 그건 오류가 아니라
+    // '아직 로그인 안 함' 이므로 안내 화면을 그대로 둔다.
+    return e.unauthorized ? undefined : failed(e);
   }
   $("#channel").onchange = (e) => {
     localStorage.setItem("channel", e.target.value);
     route();
   };
   window.addEventListener("hashchange", route);
+  showMe();
   route();
 })();

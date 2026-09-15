@@ -37,6 +37,7 @@ async def save_results(
     db,
     pairs: Sequence[tuple[int, PipelineResult]],
     model: str | None = None,
+    prompt_version: str | None = None,
 ) -> int:
     """(comment_id, 판별결과) 목록을 저장하고 저장한 건수를 돌려준다."""
     if not pairs:
@@ -53,6 +54,9 @@ async def save_results(
             category=r.llm_category,
             reasoning=r.reason or None,
             model=model if r.decided_by == "llm" else None,
+            # 어떤 기준으로 매긴 판정인지. 나중에 프롬프트를 고쳤을 때
+            # 어느 판정이 구기준인지 구분하려면 이게 있어야 한다.
+            prompt_version=prompt_version if r.decided_by == "llm" else None,
             rule_value=r.rule_value,
             rule_action=r.rule_action,
             created_at=now,

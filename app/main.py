@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-from app.api import channels, health, moderation, review, rules
+from app.api import auth, channels, health, moderation, review, rules
 from app.core.config import get_settings
 from app.db.session import engine
 
@@ -20,8 +20,27 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     # 기동 시점에 DB가 실제로 붙는지 확인한다.
     # 여기서 죽으면 잘못된 접속정보로 서버가 뜨는 걸 막을 수 있다.
-    async with engine.connect() as conn:
-        await conn.execute(text("SELECT 1"))
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as e:
+        # 그냥 두면 asyncpg 스택 트레이스 수십 줄만 나와서, 정작 'DB 가 안
+        # 떠 있다'는 사실이 안 보인다. Docker Desktop 이 꺼지면 컨테이너도
+        # 같이 멈추기 때문에 개발 중에 자주 겪는다.
+        cfg = get_settings()
+        raise RuntimeError(
+            "\n"
+            "  DB 에 연결하지 못했습니다.\n"
+            f"    접속 대상 : {cfg.postgres_host}:{cfg.postgres_port}"
+            f" / {cfg.postgres_db}\n"
+            f"    원인      : {type(e).__name__}: {str(e)[:120]}\n"
+            "\n"
+            "  대개 컨테이너가 멈춰 있어서입니다. 이것부터 해보세요:\n"
+            "    docker start outlier-db\n"
+            "\n"
+            "  그래도 안 되면 Docker Desktop 자체가 꺼진 것일 수 있습니다.\n"
+        ) from None
+
     yield
     await engine.dispose()
 
@@ -43,6 +62,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
 app.include_router(channels.router, prefix="/api")
 app.include_router(rules.router, prefix="/api")
 app.include_router(moderation.router, prefix="/api")

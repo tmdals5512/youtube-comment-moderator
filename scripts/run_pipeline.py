@@ -24,7 +24,7 @@ from sqlalchemy import text as sq
 from app.core.config import get_settings
 from app.db.models import Channel, ChannelRule
 from app.db.session import AsyncSessionLocal, engine
-from app.services.llm import LlmJudge
+from app.services.llm import LlmJudge, VideoContext
 from app.services.pipeline import HIDDEN, PASSED, QUEUE_INFO, QUEUE_JUDGE, process_many
 from app.services.store import save_results
 
@@ -79,13 +79,18 @@ async def load_comments(db, channel_id: int, limit: int | None, only_new: bool =
     같은 값에 돈을 두 번 쓸 이유가 없다.
     """
     rows = (await db.execute(sq(f"""
-        SELECT c.id, c.content, p.content AS parent
+        SELECT c.id, c.content, p.content AS parent,
+               v.title AS v_title, v.context AS v_memo
         FROM comments c
         LEFT JOIN comments p ON p.youtube_comment_id = c.parent_comment_id
+        LEFT JOIN videos v ON v.video_id = c.video_id
         WHERE c.channel_id = :cid {"AND c.status = 'pending'" if only_new else ""}
         ORDER BY c.id
     """), {"cid": channel_id})).all()
-    return [(r[0], r[1], r[2]) for r in rows][: limit or None]
+    return [
+        (r[0], r[1], r[2], VideoContext(title=r[3], memo=r[4]))
+        for r in rows
+    ][: limit or None]
 
 
 def show(results) -> None:
@@ -150,16 +155,19 @@ async def main() -> None:
         )).scalars().all()
         items = await load_comments(db, ch.id, args.n, only_new=args.new)
         title, ctx = ch.channel_title, ch.context or ""
+        auto_hide = ch.auto_hide_set
 
     by_action: dict[str, int] = {}
     for r in rules:
         by_action[r.action] = by_action.get(r.action, 0) + 1
 
     print(f"채널: {title} (id={ch.id})")
-    print(f"댓글 {len(items)}건 (답글 {sum(1 for _, _, p in items if p)}건은 부모와 함께 판단)")
+    print(f"댓글 {len(items)}건 "
+          f"(답글 {sum(1 for _, _, p, _ in items if p)}건은 부모와 함께 판단)")
     print("등록어: " + (" · ".join(f"{a} {n}개" for a, n in sorted(by_action.items()))
                        or "없음 (channel_rules 비어 있음)"))
     print(f"채널 맥락: {str(len(ctx)) + '자' if ctx else '없음'}")
+    print("자동 숨김: " + (" · ".join(sorted(auto_hide)) or "없음 (전부 검토 큐로)"))
 
     if not items:
         print("새로 판별할 댓글이 없다." if args.new else "댓글이 없다. 먼저 수집해야 한다.")
@@ -169,7 +177,7 @@ async def main() -> None:
     if args.dry:
         from app.services.moderation import judge_rules
         c = {"block": 0, "review": 0, "pass": 0}
-        for _, t, _ in items:
+        for _, t, _, _ in items:
             c[judge_rules(rules, t).verdict] += 1
         n = c["review"] + c["pass"]
         print(f"\n등록어 단계만: 차단 {c['block']} / 검토 {c['review']} / 나머지 {c['pass']}")
@@ -179,14 +187,20 @@ async def main() -> None:
 
     judge = LlmJudge(concurrency=8, max_calls=len(items) + 10, channel_context=ctx)
     print("판별 중...")
-    results = await process_many(rules, judge, [(t, p) for _, t, p in items])
+    results = await process_many(
+        rules, judge,
+        [(t, p) for _, t, p, _ in items],
+        auto_hide,
+        [v for *_, v in items],
+    )
 
     if args.save:
         async with AsyncSessionLocal() as db:
             n = await save_results(
                 db,
-                [(cid, r) for (cid, _, _), r in zip(items, results)],
+                [(cid, r) for (cid, *_), r in zip(items, results)],
                 model=get_settings().openai_model,
+                prompt_version=judge.prompt_version,
             )
         print(f"DB 저장 {n}건 (risk_assessments + comments.status)")
     else:

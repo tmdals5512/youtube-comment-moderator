@@ -17,7 +17,7 @@ import sys
 
 from sqlalchemy import func, select, update
 
-from app.db.models import Comment, RiskAssessment
+from app.db.models import Channel, Comment, RiskAssessment
 from app.db.session import AsyncSessionLocal, engine
 from app.services.pipeline import route
 from app.services.store import STATUS
@@ -33,6 +33,12 @@ async def main() -> None:
     args = ap.parse_args()
 
     async with AsyncSessionLocal() as db:
+        # 이 채널이 켜둔 자동 숨김 분류. 정책은 코드가 아니라 채널이 들고 있다.
+        ch = await db.get(Channel, args.channel)
+        if ch is None:
+            raise SystemExit(f"[FAIL] 채널 {args.channel} 이 없다.")
+        auto_hide = ch.auto_hide_set
+
         # 댓글별 최신 판정만 본다 (재판별하면 행이 쌓인다).
         latest = (
             select(
@@ -61,10 +67,11 @@ async def main() -> None:
         moved: list[tuple[Comment, RiskAssessment, str]] = []
         for c, ra in rows:
             flagged = ra.rule_action == "review"
-            dest = route(ra.risk_level or "safe", ra.category, flagged)
+            dest = route(ra.risk_level or "safe", ra.category, flagged, auto_hide)
             if dest != ra.destination:
                 moved.append((c, ra, dest))
 
+        print("자동 숨김: " + (" · ".join(sorted(auto_hide)) or "없음 (전부 검토 큐로)"))
         print(f"채널 {args.channel} · 대상 {len(rows)}건 · 바뀌는 것 {len(moved)}건\n")
 
         if not moved:

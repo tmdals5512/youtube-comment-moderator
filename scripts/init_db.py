@@ -24,6 +24,37 @@ STATEMENTS = [
     # ── 채널별 설정 ──
     # LLM 프롬프트 뒤에 붙일 채널 맥락 (은어 뜻 등)
     "ALTER TABLE channels ADD COLUMN IF NOT EXISTS context TEXT",
+    # 사람을 안 거치고 바로 가릴 분류. 콤마로 구분. NULL이면 자동 숨김 없음.
+    # 기본값을 주지 않는다 — 기존 채널의 동작이 조용히 바뀌면 안 된다.
+    "ALTER TABLE channels ADD COLUMN IF NOT EXISTS auto_hide_categories TEXT",
+
+    # ── 로그인·권한 (F_R_101) ──
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS picture TEXT",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
+    "ALTER TABLE workspaces ALTER COLUMN type SET DEFAULT 'personal'",
+    "ALTER TABLE workspace_members ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()",
+    # 같은 사람이 같은 워크스페이스에 두 번 들어가면 권한 판정이 갈린다.
+    """CREATE UNIQUE INDEX IF NOT EXISTS ux_workspace_member
+       ON workspace_members (workspace_id, user_id)""",
+
+    # 세션을 DB 에 두는 이유는 models.Session 주석 참고 (즉시 회수 가능).
+    """CREATE TABLE IF NOT EXISTS sessions (
+        token        VARCHAR(64) PRIMARY KEY,
+        user_id      INTEGER NOT NULL REFERENCES users(id),
+        created_at   TIMESTAMP DEFAULT now(),
+        expires_at   TIMESTAMP NOT NULL,
+        last_seen_at TIMESTAMP
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions (user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_sessions_expires ON sessions (expires_at)",
+
+    # ── 채널 연동 (F_R_102) ──
+    "ALTER TABLE channels ADD COLUMN IF NOT EXISTS ai_consent_at TIMESTAMP",
+    "ALTER TABLE channels ADD COLUMN IF NOT EXISTS connected_by_user_id INTEGER REFERENCES users(id)",
+    # 채널 소유자 리프레시 토큰. 연동 해제 시 반드시 NULL 로 지운다.
+    "ALTER TABLE channels ADD COLUMN IF NOT EXISTS youtube_refresh_token TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_channels_workspace ON channels (workspace_id)",
+
 
     # ── 수집 대상 영상 ──
     # 어떤 사건의 영상인지(topic)를 남겨야 나중에 주제별로 나눠 볼 수 있다.
@@ -38,6 +69,8 @@ STATEMENTS = [
     )""",
     "CREATE INDEX IF NOT EXISTS ix_videos_channel ON videos (channel_id)",
     "CREATE INDEX IF NOT EXISTS ix_videos_topic ON videos (topic)",
+    # 영상별 맥락. 채널 맥락과 나눈 이유는 models.Video.context 주석 참고.
+    "ALTER TABLE videos ADD COLUMN IF NOT EXISTS context TEXT",
 
     # ── 댓글 수집기 (F_R_107) ──
     # 답글 지원
@@ -82,6 +115,10 @@ STATEMENTS = [
     "ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS rule_value VARCHAR(255)",
     "ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS rule_action VARCHAR(10)",
     "CREATE INDEX IF NOT EXISTS ix_ra_dest ON risk_assessments (destination)",
+    # 판정 기준의 지문. models.RiskAssessment.prompt_version 주석 참고.
+    "ALTER TABLE risk_assessments ADD COLUMN IF NOT EXISTS prompt_version VARCHAR(16)",
+    """CREATE INDEX IF NOT EXISTS ix_ra_prompt
+       ON risk_assessments (prompt_version)""",
 
     "ALTER TABLE actions ADD COLUMN IF NOT EXISTS actor VARCHAR(100)",
     "ALTER TABLE actions ADD COLUMN IF NOT EXISTS note TEXT",

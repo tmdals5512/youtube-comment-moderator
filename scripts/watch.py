@@ -151,18 +151,22 @@ async def judge_round(channel_ids: set[int]) -> int:
             ).scalars().all()
             ch = await db.get(Channel, cid)
             ctx = ch.context or ""
+            auto_hide = ch.auto_hide_set
 
         if not rows:
             continue
 
         judge = LlmJudge(concurrency=8, max_calls=len(rows) + 10, channel_context=ctx)
-        results = await process_many(rules, judge, [(r[1], r[2]) for r in rows])
+        results = await process_many(
+            rules, judge, [(r[1], r[2]) for r in rows], auto_hide
+        )
 
         async with AsyncSessionLocal() as db:
             await save_results(
                 db,
                 [(r[0], v) for r, v in zip(rows, results)],
                 model=get_settings().openai_model,
+                prompt_version=judge.prompt_version,
             )
 
         st = judge.stats
