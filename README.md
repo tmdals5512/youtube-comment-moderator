@@ -1,7 +1,8 @@
 # youtube-comment-moderator
 
-유튜브 채널 관리자를 위한 유해댓글 검토 도구. 댓글을 모아 유해성을 판별하고,
-관리자가 우선순위대로 확인해 조치할 수 있게 한다.
+유튜브 채널 관리자를 위한 유해댓글 검토 도구. 채널을 연결하면 서버가 매시간
+새 댓글을 모아 유해성을 판별하고, 관리자가 우선순위대로 확인해 조치하면
+유튜브에 실제로 반영된다.
 
 광주 인공지능사관학교 기업연계 프로젝트 (팀 Outlier).
 
@@ -14,44 +15,92 @@
 조치는 사람이 하도록** 나눈다.
 
 ```
-댓글 수집
+구글 로그인 → 채널 연결 (YouTube OAuth) → AI 판별 동의
    ↓
-① 관리자 등록어         차단어면 → 숨김 (LLM 안 부름)
-   ↓                    검토어면 → 표시만 해두고 계속
-② LLM 판별              유해 / 애매 / 정상 + 카테고리
+서버가 매시간                            app/services/watcher.py
+   최신 영상 댓글 수집 (새 것만)
+   ① 관리자 등록어         차단어 → 숨김 (LLM 안 부름) / 검토어 → 표시
+   ② LLM 판별              harmful / ambiguous / safe + 카테고리
+   ③ 검토 큐               위험도순. ambiguous 는 한 단계 아래
    ↓
-③ 검토 큐               위험도순으로 관리자에게 쌓인다
+관리자가 하나씩             숨김 / 유지 / 채널차단
    ↓
-④ 관리자 조치           숨김 / 유지 / 채널차단
+유튜브에 반영               comments.setModerationStatus
 ```
 
 등록어에 안 걸린 댓글도 전부 LLM으로 보낸다. 등록어만 검사하면 관리자가 미리
 상상한 단어만 잡히고, 새 은어나 우회 표기는 그대로 빠져나가기 때문이다.
 
+전 구간을 실제 채널로 확인했다 (2026-09-15): 숨김 → 시청자 조회에서 사라짐,
+복구 → 다시 보임.
+
 ## 설계에서 정한 것들
 
 측정해보고 정한 것이라 되돌리려면 근거가 필요하다.
 
-**자동 숨김을 두지 않는다.** `AUTO_HIDE_CATEGORIES`는 비어 있다. 마지막까지
-'욕설' 하나는 남겨뒀었지만 실데이터에서 무너졌다 — 방송 고지문 인용,
-행동 지적, `보지마`를 성기로 읽은 오독까지 사람을 안 거치고 가려졌다.
-되돌릴 수 없는 조치를 기계에 맡기는 설계 자체가 문제였다. 자세한 사례는
+**자동 숨김을 두지 않는다.** 기본값은 전부 꺼짐. 마지막까지 '욕설' 하나는
+남겨뒀었지만 실데이터에서 무너졌다 — 방송 고지문 인용, 행동 지적, `보지마`를
+성기로 읽은 오독까지 사람을 안 거치고 가려졌다. 채널이 카테고리별로 직접 켤
+수는 있다 (관리 기준 화면). 자세한 사례는
 [`app/services/pipeline.py`](app/services/pipeline.py) 주석에 있다.
 
-**1차 규칙에 기본 차단 목록이 없다.** `DEFAULT_BLOCK_WORDS = []`.
-1차는 판별기가 아니라 관리자 통제 장치다. 등록어가 하나도 없어도 파이프라인은
-정상 동작한다(전부 LLM으로 간다).
+**확신 없으면 ambiguous.** LLM 이 harmful 이나 safe 로 억지로 정하지 않고
+관리자에게 넘긴다. 검토 큐가 그만큼 길어지는데, 그게 이 제품의 방향이다 —
+관리자가 안 본 채 남는 댓글이 없어야 한다.
 
-**외부 유해표현 API는 쓰지 않는다.** 비교 측정 코드만 남겼다.
-COREPIN은 무료 규칙 대비 탐지율 차이가 1.4%p인데 건당 5원이었고,
-OpenAI Moderation은 한국어 탐지율이 19.8%였다.
+**채널별 차이는 프롬프트가 아니라 정책으로.** 채널마다 다른 기준을 LLM 에
+글로 써넣는 방식은 실험 결과 일관되지 않았다 (관리자 결정 30건에서 규칙을
+뽑게 하면 사람이 쓴 것과 63% 일치, 3건에서 한 문장씩 뽑으면 90%). 지금은
+채널별 자동 숨김 토글로 다루고, 자유 텍스트 기준은 참고 정보로만 붙는다.
 
-**LLM이 주는 confidence는 쓰지 않는다.** 맞을 때 0.98, 틀릴 때 0.96으로
+**1차 규칙에 기본 차단 목록이 없다.** 1차는 판별기가 아니라 관리자 통제
+장치다. 등록어가 하나도 없어도 파이프라인은 정상 동작한다.
+
+**외부 유해표현 API 는 쓰지 않는다.** COREPIN 은 무료 규칙 대비 탐지율 차이가
+1.4%p 인데 건당 5원이었고, OpenAI Moderation 은 한국어 탐지율이 19.8%였다.
+
+**LLM 이 주는 confidence 는 쓰지 않는다.** 맞을 때 0.98, 틀릴 때 0.96 으로
 구분이 되지 않았다.
+
+## 프롬프트
+
+[`app/services/llm.py`](app/services/llm.py). 판단 순서 4단계 + 카테고리 11개
++ 예시 23개. 실제로 LLM 이 받는 형태는 `python -m scripts.show_prompt` 로
+본다 ([`docs/프롬프트_공통.txt`](docs/프롬프트_공통.txt) 에 스냅샷).
+
+v3 까지는 새 댓글이 틀릴 때마다 그 댓글을 예시로 붙였다. 예시가 43개까지
+늘었고 회귀 세트 39건 중 14건이 예시에 그대로 들어가 있었다 — 시험이 아니라
+암기였다. v4 는 원칙을 네 질문으로 접고 예시를 대비쌍만 남겼다. 이력과
+교훈은 파일 헤더에 있다.
+
+**프롬프트 수정 규칙.** 새 오판 하나로 고치지 않는다.
+[`eval/오류기록.csv`](eval/) 에 유형을 붙여 적고, 같은 유형이 3건 쌓이면
+일반 원칙 한 줄을 고친다. 그 댓글을 예시로 넣지 않는다.
+
+```
+실데이터에서 오판 → 오류기록.csv 에 기록 (유형 포함)
+   → 같은 유형 3건? → 예: 원칙 한 줄 수정 → 회귀 세트 전체 재실행
+                    → 아니오: 기록만
+```
+
+## 회귀 세트
+
+`eval/회귀세트.csv` 39건. 정답은 라벨이 아니라 '관리자가 봐야 하나' 로 매긴다
+(통과 / 애매 / 유해). 프롬프트를 고치면 이걸로 채점한다:
+
+```bash
+python -m scripts.check_prompt              # 공통 프롬프트, 약 7원
+python -m scripts.check_prompt --channel 4  # 채널 기준 붙여서
+```
+
+**이 점수는 정확도가 아니다.** 39건의 정답은 개발자가 매긴 것이고, 프롬프트가
+우리가 박아둔 동작을 재현하는지 보는 회귀 시험이다. 판정은 같은 입력에도
+약 8% 흔들리므로 ±2 안의 변화는 변화가 아니다. 실제 정확도는 사람이 라벨링한
+데이터(`labeling/`, 4명 × 1,000건)가 나와야 말할 수 있다.
 
 ## 실행
 
-PostgreSQL(pgvector)과 Python 3.13이 필요하다.
+PostgreSQL(pgvector) 과 Python 3.13 이 필요하다.
 
 ```bash
 # 1. DB
@@ -59,97 +108,135 @@ docker run -d --name outlier-db \
   -e POSTGRES_PASSWORD=<비밀번호> -p 5432:5432 pgvector/pgvector:pg17
 
 # 2. 설정
-cp .env.example .env        # DB 비밀번호와 API 키를 채운다
+cp .env.example .env        # DB 비밀번호, YOUTUBE_API_KEY, OPENAI_API_KEY,
+                            # GOOGLE_CLIENT_ID / SECRET (구글 콘솔 OAuth 클라이언트)
 pip install -r requirements.txt
-python -m scripts.init_db   # 테이블 생성
+python -m scripts.init_db
 
 # 3. 서버
-python -m uvicorn app.main:app --port 8000
+python run.py               # 또는 python -m uvicorn app.main:app --port 8000
 ```
 
 | 주소 | 화면 |
 |---|---|
-| http://127.0.0.1:8000/ | 온보딩 (로그인 → 채널 연동 → 동의) |
-| http://127.0.0.1:8000/app | 관리자 화면 (대시보드·검토 큐·숨김·기준·이력) |
-| http://127.0.0.1:8000/docs | API 문서 (Swagger) |
+| http://localhost:8000/ | 로그인 (Google) |
+| http://localhost:8000/app | 관리자 화면 |
+| http://localhost:8000/docs | API 문서 |
+| http://localhost:8000/api/health/watch | 자동 감시 상태 (대시보드에도 나옴) |
 
-인증은 아직 붙지 않았다. Google/YouTube OAuth가 들어오기 전까지 온보딩은
-클릭으로 넘어간다.
+`127.0.0.1` 이 아니라 `localhost` 로 접속한다. 구글 콘솔에 등록한 리디렉션
+URI 와 같아야 한다. 개발 중 구글 없이 들어가려면 `.env` 에 `DEBUG=true`,
+`DEV_LOGIN=true` 를 두고 `/api/auth/dev-login` 으로 간다.
+
+## 자동 감시
+
+서버가 켜져 있는 동안 연동 + 동의된 채널을 매시간 본다
+([`app/services/watcher.py`](app/services/watcher.py)).
+
+- 채널당 최신 영상 10개, 영상당 댓글 200건. 이미 있는 댓글은 건너뛰고
+  새 것만 판별한다. 새 댓글이 0건이면 LLM 비용도 0이다
+- 유튜브 쿼터는 채널당 하루 약 720 units. 채널 10개까지 들어온다
+- 하루 LLM 상한 3,000건 (`LLM_DAILY_CAP`). 넘으면 그날은 멈추고 다음 날
+  이어간다. 못 본 댓글은 pending 으로 남아 잃어버리지 않는다
+- 주기·건수는 `.env` 의 `WATCH_*` 로 바꾼다
+
+연동 안 된 채널(수집만 하는 샘플)은 감시 대상이 아니다. 그쪽은
+`scripts/collect_channel` 과 `scripts/run_pipeline` 으로 따로 돌린다.
 
 ## API
 
-`/docs`에 전부 있고, 응답 예시는
-[`docs/api/samples.json`](docs/api/samples.json)에 있다 (댓글 원문과 작성자명은
-가려두었다).
+`/docs` 에 전부 있다. 응답 예시는 [`docs/api/samples.json`](docs/api/samples.json)
+(댓글 원문과 작성자명은 가려두었다).
 
 | | |
 |---|---|
-| `GET /api/channels` | 연동된 채널 목록 |
-| `GET /api/channels/{id}/stats` | 처리 현황 (검토 전환율, 카테고리 분포) |
+| `GET /api/auth/start` | 로그인 시작 (구글 또는 개발용) |
+| `GET /api/channels/connect/start` | 채널 연결 (YouTube 권한) |
+| `GET /api/channels` | 채널 목록. `connected` 가 유튜브 권한 유무 |
+| `GET·PUT /api/channels/{id}/consent` | AI 판별 동의 |
+| `GET·PUT /api/channels/{id}/auto-hide` | 자동 숨김 카테고리 |
+| `GET·PUT /api/channels/{id}/context` | 채널 기준 (참고 정보) |
+| `POST /api/channels/{id}/disconnect` | 연동 해제 — 데이터 전부 삭제 |
+| `GET /api/channels/{id}/stats` | 처리 현황 |
 | `GET /api/channels/{id}/queue` | 검토 큐 — 위험도순 |
-| `GET /api/channels/{id}/hidden` | 숨김 목록 — 오탐을 발견하는 통로 |
-| `GET /api/channels/{id}/history` | 처리 이력 (누가 언제 무엇을 왜) |
-| `POST /api/comments/{id}/action` | 조치 (숨김 / 유지 / 채널차단) |
-| `GET /api/comments/{id}/similar` | 과거 유사 사례 (임베딩 유사도) |
-| `GET·POST·PATCH·DELETE /api/channels/{id}/rules` | 등록어 관리 |
+| `GET /api/channels/{id}/hidden` | 숨김 목록 |
+| `GET /api/channels/{id}/history` | 처리 이력 |
+| `POST /api/comments/{id}/action` | 조치. 유튜브에 반영되고 `youtube_synced` 로 확인 |
+| `GET /api/comments/{id}/similar` | 과거 유사 사례 |
+| `GET·POST·PATCH·DELETE /api/channels/{id}/rules` | 등록어 |
 | `POST /api/moderation/check` | 댓글 1건 즉시 판정 |
 
-검토 큐 정렬은 카테고리별 위험도에 확산도(좋아요+답글)를 반영한다.
-신상털기·위협·자해는 늦으면 되돌릴 수 없어 가장 위로 올린다.
+채널을 다루는 모든 엔드포인트는 `require_channel` 을 거친다. 남의 채널이면
+404 다 (403 은 존재를 알려준다).
 
 ## 구조
 
 ```
 app/
-  api/        엔드포인트 (channels, rules, moderation, review, health)
+  api/        auth, channels, rules, moderation, review, health
+  core/       config, deps (인증·격리의 유일한 관문)
   services/
-    collector.py   YouTube 수집. 기본 호출은 답글의 58%만 오므로
-                   잘린 스레드를 따로 보충해 전량을 맞춘다
-    pattern.py     등록어 1개에서 우회표현 정규식을 만든다
-                   (초성·겹자음·사이끼어들기·모음늘이기)
-    moderation.py  등록어 검사 (allow → block → review 순, 채널별 격리)
-    llm.py         LLM 판별. 판단원칙과 예시로 문맥·공격대상·의도를 보게 한다
-    pipeline.py    위 조각을 순서대로 잇는다. 정책은 route() 하나에만 있다
-    embed.py       임베딩 (유사 사례 검색용)
-  db/         SQLAlchemy 모델·세션
-  static/     관리자 화면 (빌드 단계 없는 정적 파일)
+    google_oauth.py    구글 로그인·채널 연동 (httpx 직접 구현)
+    youtube_actions.py 숨김·복구·채널차단을 유튜브에 반영
+    collector.py       댓글 수집. 기본 호출은 답글의 58%만 오므로 잘린 스레드 보충
+    pattern.py         등록어 1개 → 우회표현 정규식 (초성·겹자음·끼어들기·모음늘이기)
+    moderation.py      등록어 검사 (allow → block → review, 채널별 격리)
+    llm.py             LLM 판별. 프롬프트와 이력이 여기 있다
+    pipeline.py        조각을 잇는다. 행선지 정책은 route() 하나에만
+    store.py           판정 저장. 덮어쓰지 않고 쌓는다 (prompt_version 기록)
+    watcher.py         자동 감시 (매시간)
+    retention.py       30일 파기 (매일)
+    embed.py           임베딩 (유사 사례)
+  db/         모델·세션
+  static/     관리자 화면 (빌드 없는 정적 파일)
 scripts/      수집·판별·평가 CLI
-tests/        pytest
+tests/        pytest, 171개
 ```
-
-정책을 `route()` 하나에 모아둔 덕에, 무엇을 숨길지 바꿔도 LLM을 다시 부르지 않고
-저장된 판정만으로 재배치할 수 있다 (`scripts/reroute.py`). 프롬프트 자체를
-고쳤을 때만 다시 묻는다 (`scripts/rejudge.py`).
 
 ## 주요 스크립트
 
 ```bash
-python -m scripts.collect_channel @채널핸들 20   # 최신 영상 20개의 댓글 수집
-python -m scripts.run_pipeline --channel 4 --save  # 파이프라인 실행 (--save 없으면 저장 안 함)
-python -m scripts.rejudge --channel 4 --dry      # 프롬프트 개정 후 재판정 (건수·비용만)
-python -m scripts.reroute --channel 4 --apply    # 정책만 바꿨을 때 재배치 (LLM 안 부름)
-python -m scripts.eval_llm --n 200               # 판별 정확도 채점
-python -m pytest                                 # 테스트
+python -m scripts.check_prompt                     # 회귀 세트 채점 (프롬프트 고친 뒤)
+python -m scripts.show_prompt [채널id]             # LLM 이 받는 프롬프트 출력
+python -m scripts.collect_channel @핸들 5 60       # 연동 안 된 채널 수집 (영상 5, 영상당 60)
+python -m scripts.run_pipeline --channel 4 --save  # 판별 (--save 없으면 저장 안 함)
+python -m scripts.consent --channel 4 --agree      # 샘플 채널 동의 플래그
+python -m scripts.rejudge --channel 4 --dry        # 재판별 (건수·비용만)
+python -m scripts.reroute --channel 4 --apply      # 정책만 바꿨을 때 재배치 (LLM 안 부름)
+python -m scripts.yt_held_probe 1474               # 유튜브가 보류한 댓글을 받을 수 있나
+python -m pytest
 ```
 
 ## 데이터 취급
 
-- 댓글 원문과 작성자 정보는 수집 후 최대 30일 보관하고, 이후에는 위험도 등
-  파생 지표만 남긴다
-- 채널마다 데이터를 격리한다. 서로 다른 채널의 지표를 한 화면에서 비교해
-  보여주지 않는다
-- 채널 연동을 해제하면 해당 채널 데이터를 전부 삭제한다
-- 수집 산출물(`eval/`)과 `.env`는 레포에 올리지 않는다 (`.gitignore`)
+- 댓글 원문·작성자·임베딩·판단근거는 30일 뒤 서버가 자동으로 지운다.
+  위험도 등 파생 지표만 남는다
+- 채널마다 데이터를 격리한다. 다른 채널 지표를 한 화면에서 비교하지 않는다
+- 채널 연동을 해제하면 그 채널의 댓글·판정·조치·영상·규칙을 전부 삭제한다
+- `eval/`, `labeling/`, `.env` 는 레포에 올리지 않는다. `eval/회귀세트.csv` 와
+  `eval/오류기록.csv` 는 실제 댓글이 들어 있어 팀 내부에서 따로 전달한다.
+  없으면 `check_prompt` 가 파일 없다고 멈춘다
 
 유튜브 정책상 댓글을 완전히 삭제할 수는 없다. 조치는
-`comments.setModerationStatus(rejected)`로 비공개 처리하는 것이고,
-채널차단도 해당 채널에서만 적용된다.
+`comments.setModerationStatus(rejected)` 로 비공개 처리하는 것이고,
+채널차단도 해당 채널에서만 적용된다. 유튜브가 보류(heldForReview)한 댓글은
+OAuth 로 받아올 수 있다는 걸 확인했다 (`yt_held_probe`).
+
+## 지금 상태와 남은 것
+
+되는 것: 로그인 → 연동 → 자동 수집·판별 → 검토 큐 → 조치 → 유튜브 반영 →
+복구 → 이력 → 30일 파기. 실채널 1개 연동, 샘플 채널 3개.
+
+정하지 않은 것:
+- 위험도 표(`review.py` 의 `SEVERITY`)는 개발자가 정했고 큐의 65~80% 가
+  '모욕=보통' 한 칸에 몰린다. LLM 이 직접 매기게 하려면 등급 정의를 팀이 써야 한다
+- 채널별 기준을 누가 어떻게 만드는지. 실험 결과는 위 "설계에서 정한 것들" 에
 
 ## 평가 데이터
 
-정확도 채점에는 [UnSmile](https://github.com/smilegate-ai/korean_unsmile_dataset)을
-쓴다. CC BY-NC-ND라 채점 용도로만 쓰고, 단어를 추출해 규칙에 넣거나 상업적으로
-이용하지 않는다. 레포에 포함하지 않으므로 직접 받아야 한다.
+정확도 채점에는 [UnSmile](https://github.com/smilegate-ai/korean_unsmile_dataset)
+을 쓴다. CC BY-NC-ND 라 채점 용도로만 쓰고, 단어를 추출해 규칙에 넣거나
+상업적으로 이용하지 않는다. 레포에 포함하지 않는다.
 
 ## 팀
 
