@@ -47,6 +47,23 @@ class Settings(BaseSettings):
     # 사고 방지용 상한. 한 번 실행에서 이 건수를 넘으면 멈춘다.
     llm_max_calls_per_run: int = 600
 
+    # 서버가 스스로 하는 감시 (app/services/watcher.py).
+    # 연동 + 동의한 채널의 최신 영상을 주기적으로 긁어 새 댓글만 판별한다.
+    #
+    # 유튜브 쿼터는 하루 10,000 units. 채널 하나가 한 주기에 쓰는 건
+    # 대략 1 (영상 목록) + 영상수 × 2~3 (댓글) 이다. 영상 10개·1시간 주기면
+    # 채널당 하루 ~720 이라 채널 10개까지는 들어온다. 그 위로는 주기를 늘린다.
+    watch_enabled: bool = True
+    watch_interval: int = 3600            # 초. 1시간
+    watch_videos_per_channel: int = 10    # 채널당 볼 최신 영상 수
+    watch_per_video: int = 200            # 영상당 받아올 댓글. 새 댓글은 최신순 앞쪽에 있다
+
+    # 하루에 LLM 을 부를 최대 횟수. 실행당 상한(위)만 있으면, 댓글이 폭발하는
+    # 영상 하나가 매시간 600건씩 하루 14,400건을 태울 수 있다. 3,000건이면
+    # 약 500원이다. 넘치면 그날은 판별을 멈추고 다음 날 이어간다 — 댓글은
+    # pending 으로 남아 있어서 잃어버리지 않는다.
+    llm_daily_cap: int = 3000
+
     # Google OAuth 2.0.
     # 로그인(openid/email/profile)과 채널 연동(youtube.force-ssl)은 같은
     # 클라이언트를 쓰되 흐름을 나눈다 — 로그인하는데 채널 관리 권한까지

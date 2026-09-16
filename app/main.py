@@ -13,7 +13,7 @@ from sqlalchemy import text
 from app.api import auth, channels, health, moderation, review, rules
 from app.core.config import get_settings
 from app.db.session import engine
-from app.services.retention import run_forever
+from app.services import retention, watcher
 
 settings = get_settings()
 
@@ -43,17 +43,24 @@ async def lifespan(app: FastAPI):
             "  그래도 안 되면 Docker Desktop 자체가 꺼진 것일 수 있습니다.\n"
         ) from None
 
-    # 보관기한 파기를 서버가 스스로 돌린다. 손으로 돌리는 스크립트만
-    # 있으면 누군가 잊는 순간 30일 정책이 조용히 깨진다.
-    파기 = asyncio.create_task(run_forever())
+    # 서버가 스스로 하는 일 둘.
+    #   파기 — 보관기한 지난 원문을 지운다. 스크립트만 있으면 잊는 순간 깨진다.
+    #   감시 — 연동된 채널의 새 댓글을 긁어 판별한다. 이게 없으면 관리자가
+    #          채널을 연결해도 개발자가 스크립트를 돌려줘야 화면에 뭐가 뜬다.
+    작업 = [
+        asyncio.create_task(retention.run_forever()),
+        asyncio.create_task(watcher.run_forever()),
+    ]
 
     yield
 
-    파기.cancel()
-    try:
-        await 파기
-    except asyncio.CancelledError:
-        pass
+    for t in 작업:
+        t.cancel()
+    for t in 작업:
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
     await engine.dispose()
 
 

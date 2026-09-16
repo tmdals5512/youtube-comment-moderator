@@ -8,6 +8,8 @@
      호출할 게 없었던 경우까지 True 로 두면 이력에서 구분이 안 된다.
 """
 
+from datetime import datetime
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -29,6 +31,10 @@ from app.main import app
 from app.services import youtube_actions as yt
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _ok(*a, **k):
+    return yt.ActionResult(True)
 
 메일 = "yt@test.local"
 
@@ -222,6 +228,57 @@ class TestKeep:
 
         assert 불린것["status"] == yt.PUBLISH
         assert r.json()["youtube_synced"] is True
+
+    async def test_복구하면_검토_큐로_돌아간다(self, client, 세상, monkeypatch):
+        """숨긴 걸 되돌리면 '아직 판단 안 함' 으로 가야 한다.
+
+        통과로 처리하면 그 댓글이 숨김 목록에서도 검토 큐에서도 빠져서,
+        잘못 숨겼다가 되돌린 댓글을 다시 볼 방법이 없어진다.
+        """
+        async with AsyncSessionLocal() as db:
+            c = await db.get(Comment, 세상["comment"])
+            c.status = "hidden"
+            c.reviewed_at = datetime(2020, 1, 1)
+            await db.commit()
+
+        monkeypatch.setattr(
+            yt, "set_moderation",
+            lambda *a, **k: _ok(),
+        )
+        r = await _action(client, 세상, action="keep")
+        assert r.json()["status"] == "queued"
+
+        async with AsyncSessionLocal() as db:
+            c = await db.get(Comment, 세상["comment"])
+            # 검토 큐는 status 와 reviewed_at 을 함께 본다. 하나만 되돌리면
+            # 어느 목록에도 안 뜬다 — 실제로 그렇게 사라진 적이 있다.
+            assert c.status == "queued"
+            assert c.reviewed_at is None
+
+    async def test_검토_큐에서_유지하면_통과로_남는다(
+        self, client, 세상, monkeypatch
+    ):
+        """같은 keep 이라도 공개중인 걸 유지한 것은 판단이 끝난 것이다."""
+        r = await _action(client, 세상, action="keep")
+        assert r.json()["status"] == "passed"
+
+        async with AsyncSessionLocal() as db:
+            c = await db.get(Comment, 세상["comment"])
+            assert c.status == "passed"
+            assert c.reviewed_at is not None
+
+
+class TestDuplicate:
+    async def test_hiding_hidden_comment_is_409(self, client, 세상, monkeypatch):
+        """이미 가려진 걸 또 가리면 이력만 쌓인다. 화면은 버튼을 감췼지만
+        API 는 열려 있었다."""
+        monkeypatch.setattr(yt, "set_moderation", lambda *a, **k: _ok())
+        first = await _action(client, 세상, action="hide")
+        assert first.status_code == 200
+
+        second = await _action(client, 세상, action="hide")
+        assert second.status_code == 409
+        assert len(await _actions(세상["comment"])) == 1
 
 
 class TestNotConnected:

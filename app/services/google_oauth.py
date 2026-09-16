@@ -99,6 +99,12 @@ def authorize_url(
         # 재연동한 채널만 조용히 조치가 안 되는 일이 생긴다.
         params["access_type"] = "offline"
         params["prompt"] = "consent"
+    else:
+        # 로그인은 계정을 고르게 한다. 이걸 안 주면, 브라우저에 이미 구글
+        # 계정이 붙어 있고 전에 동의까지 했을 때 구글이 아무것도 안 묻고
+        # 곧바로 돌려보낸다 — 화면이 번쩍하고 지나가서 로그인이 안 된 걸로
+        # 보인다. 계정이 여러 개일 때 어느 쪽으로 들어갔는지도 알 수 없다.
+        params["prompt"] = "select_account"
     return f"{AUTH_URL}?{urlencode(params)}"
 
 

@@ -8,7 +8,7 @@
 남의 워크스페이스에 무엇이 있는지 알려줄 이유가 없다.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import Cookie, Depends, HTTPException, status
 from sqlalchemy import select
@@ -42,7 +42,7 @@ async def current_user(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "세션이 유효하지 않습니다")
 
     session, user = row
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
     if session.expires_at <= now:
         # 만료된 세션은 그 자리에서 지운다. 쌓여봐야 쓸모가 없다.
         await db.delete(session)
@@ -131,7 +131,14 @@ async def require_comment(
 
 
 def require_role(minimum: str):
-    """조치처럼 되돌리기 어려운 일에 최소 권한을 건다."""
+    """조치처럼 되돌리기 어려운 일에 최소 권한을 건다.
+
+    아직 어디에도 안 걸려 있다. 조치 엔드포인트(/comments/{id}/action)는
+    URL 에 channel_id 가 없어서 이 의존성을 그대로 못 쓴다. 그래서 지금은
+    워크스페이스에 속한 사람이면 role 이 member 여도 숨김·차단을 할 수 있다.
+    member 를 읽기 전용으로 둘 거면 require_comment 기반으로 다시 짜야 한다 —
+    그건 권한 정책이라 팀이 정한 뒤에 한다.
+    """
 
     async def check(
         channel: Channel = Depends(require_channel),

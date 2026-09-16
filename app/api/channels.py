@@ -1,6 +1,6 @@
 """채널 목록과 채널별 자동 숨김 설정."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
@@ -10,7 +10,12 @@ from sqlalchemy import text as sq
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.deps import current_user, my_workspace_ids, require_channel
+from app.core.deps import (
+    current_user,
+    my_workspace_ids,
+    optional_user,
+    require_channel,
+)
 from app.db.models import (
     Action,
     Channel,
@@ -50,6 +55,11 @@ class ChannelOut(BaseModel):
 
     id: int
     channel_title: str | None
+    connected: bool = Field(
+        False,
+        description="유튜브 조치 권한(리프레시 토큰)이 있는지. "
+        "없으면 숨김을 눌러도 우리 기록에만 남는다.",
+    )
 
 
 class CategoryOption(BaseModel):
@@ -89,7 +99,7 @@ def _connect_uri() -> str:
 
 @router.get("/connect/start", include_in_schema=False)
 async def connect_start(
-    user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    user: User | None = Depends(optional_user), db: AsyncSession = Depends(get_db)
 ):
     """채널 소유자에게 '댓글 관리' 권한을 요청한다.
 
@@ -97,6 +107,11 @@ async def connect_start(
     댓글을 가릴 수 있는 권한까지 달라고 해야 한다. 로그인할 때부터 그걸
     요구하면 동의 화면이 과해지고, 채널을 안 붙일 팀원도 있다.
     """
+    # 브라우저에서 바로 누르는 버튼이다. 로그인이 안 돼 있으면 401 JSON 이
+    # 그대로 보여서 길이 막힌다 — 로그인으로 보내고, 끝나면 여기로 돌아온다.
+    if user is None:
+        return RedirectResponse("/api/auth/start?next=/api/channels/connect/start")
+
     cfg = get_settings()
     if not cfg.oauth_ready:
         raise HTTPException(
@@ -148,7 +163,7 @@ async def connect_callback(
     if not owned:
         return RedirectResponse("/app#/channels?error=no_channel")
 
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
     붙임, 막힘 = 0, []
     for ch in owned:
         row = (
@@ -235,7 +250,9 @@ async def set_consent(
     지우고 싶으면 연동 해제를 쓴다(그쪽은 전부 지운다).
     """
     channel.ai_consent_agreed = payload.agreed
-    channel.ai_consent_at = datetime.utcnow() if payload.agreed else None
+    channel.ai_consent_at = (
+        datetime.now(UTC).replace(tzinfo=None) if payload.agreed else None
+    )
     await db.commit()
     await db.refresh(channel)
     return _consent_out(channel)
@@ -376,7 +393,16 @@ async def list_channels(
     result = await db.execute(
         select(Channel).where(Channel.workspace_id.in_(ws)).order_by(Channel.id)
     )
-    return result.scalars().all()
+    # 토큰 자체는 절대 내보내지 않는다. 있는지 여부만 알려준다 —
+    # 화면이 '조치가 유튜브에 반영되는 채널'인지 구분할 수 있어야 해서다.
+    return [
+        ChannelOut(
+            id=c.id,
+            channel_title=c.channel_title,
+            connected=bool(c.youtube_refresh_token),
+        )
+        for c in result.scalars().all()
+    ]
 
 
 def _out(channel: Channel) -> AutoHideOut:

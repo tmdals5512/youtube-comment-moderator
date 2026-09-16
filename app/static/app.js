@@ -3,7 +3,8 @@
  * 빌드 도구를 쓰지 않는다. node 를 안 깔아도 되고, 파일을 저장하면 새로고침만
  * 하면 된다. FastAPI 가 같은 서버에서 내보내므로 CORS 도 안 탄다.
  *
- * 화면 5개를 해시 라우팅으로 전환한다: 대시보드 / 검토 큐 / 숨김 / 관리 기준 / 이력.
+ * 화면 6개를 해시 라우팅으로 전환한다:
+ * 대시보드 / 채널 관리 / 검토 큐 / 숨김 목록 / 관리 기준 / 처리 이력.
  */
 
 // 화면이 이유 없이 비어 보이는 게 제일 나쁘다. 잡히지 않은 오류는
@@ -47,16 +48,35 @@ async function api(path, opts) {
   return r.status === 204 ? null : r.json();
 }
 
+// 구글에서 돌아오다 실패하면 /app?login_error=... 로 온다. 왜 안 됐는지를
+// 여기서 말해준다 — 전에는 400 JSON 이 브라우저에 그대로 떴다.
+const 로그인오류 = {
+  cancelled: "로그인을 취소하셨습니다.",
+  access_denied:
+    "구글에서 거부됐습니다. 미검증 앱이라 '테스트 사용자'로 등록된 계정만 됩니다.",
+  state:
+    "로그인 절차가 중간에 끊겼습니다 (서버가 재시작됐거나 너무 오래 걸렸습니다). " +
+    "다시 시도해주세요.",
+};
+
 function showLogin() {
   stopRefresh();
+  const code = new URLSearchParams(location.search).get("login_error");
+  const 오류 = code
+    ? `<div class="note" style="margin:0 auto 18px;max-width:420px;text-align:left;
+                border-color:var(--critical)">${esc(로그인오류[code] || code)}</div>`
+    : "";
   view.innerHTML = `
     <div class="empty" style="padding:60px 20px;text-align:center">
       <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:8px">
         로그인이 필요합니다</div>
+      ${오류}
       <div style="margin-bottom:20px">채널 데이터는 로그인한 사람에게만 보입니다.</div>
       <button id="login" style="flex:0 0 auto;padding:10px 30px">로그인</button>
     </div>`;
   $("#login").onclick = () => {
+    // login_error 는 다시 들고 가지 않는다. 성공하고 돌아왔는데 옛 오류가
+    // 남아 있으면 헷갈린다.
     location.href =
       "/api/auth/start?next=" +
       encodeURIComponent(location.pathname + location.hash);
@@ -122,22 +142,39 @@ async function loadChannels() {
   if (pick) $("#channel").value = pick;
 }
 
+/** 지금 고른 채널이 유튜브 권한 없이 돌고 있으면 그렇다고 말해준다.
+ *
+ *  수집·판별은 API 키만으로도 되지만, 숨김을 실제로 반영하려면 채널
+ *  주인이 OAuth 로 권한을 줘야 한다. 이 구분이 화면에 없으면, 숨김을
+ *  눌러 놓고 유튜브에 반영된 줄 알게 된다 — 가장 나쁜 종류의 오해다.
+ */
+function 연동배너() {
+  const 배너 = $("#banner");
+  if (!배너) return;
+  const c = channels.find((x) => x.id === channelId());
+  if (!c || c.connected || location.hash.split("?")[0] === "#/channels") {
+    배너.innerHTML = "";
+    return;
+  }
+  배너.innerHTML = `
+    <div class="note" style="margin:0 0 4px;border-color:var(--critical)">
+      <b>${esc(c.channel_title)}</b> 는 유튜브 권한이 없습니다.
+      댓글 수집과 판별은 되지만, <b>숨김을 눌러도 유튜브에는 반영되지 않고
+      우리 기록에만 남습니다.</b>
+      <a href="#/channels" style="margin-left:6px">채널 관리에서 연동하기</a>
+    </div>`;
+}
+
 // ── 대시보드 ──────────────────────────────────────────
 
-/** 관리자가 실제로 얼마나 일했나.
+/** 관리자가 실제로 처리한 건수. 세는 값만 보여준다.
  *
- *  '몇 시간 아꼈다' 는 쓰지 않는다. 안 썼을 때 몇 시간 걸렸을지는 잴 수
- *  없어서 그건 추정이다. 잰 값만 보여주고 판단은 보는 사람에게 맡긴다.
+ *  '건당 N초' '전부 보면 N시간' 을 여기 띄웠었다. 개발 중 클릭 간격을 잰
+ *  거라 관리자 판단 시간이 아니었는데 '실측' 이라고 써 있었다. 뺐다.
  */
 function 일한양(s) {
   const w = s.workload;
   if (!w || !w.reviewed) return "";
-
-  const 남은시간 =
-    w.seconds_per_item && s.unreviewed
-      ? (w.seconds_per_item * s.unreviewed) / 3600
-      : null;
-
   return `
     <div class="card" style="margin-bottom:16px">
       <h2>처리 현황</h2>
@@ -148,36 +185,50 @@ function 일한양(s) {
             <span style="font-size:12px;font-weight:400;color:var(--muted)">
               전체의 ${(w.seen_ratio * 100).toFixed(2)}%</span></div>
         </div>
-        ${
-          w.seconds_per_item
-            ? `<div>
-                 <div style="font-size:12px;color:var(--muted)">건당 처리 시간</div>
-                 <div style="font-size:20px;font-weight:700">${w.seconds_per_item}초
-                   <span style="font-size:12px;font-weight:400;color:var(--muted)">
-                     실측</span></div>
-               </div>
-               <div>
-                 <div style="font-size:12px;color:var(--muted)">전부 보셨다면</div>
-                 <div style="font-size:20px;font-weight:700">${w.all_comments_hours}시간
-                   <span style="font-size:12px;font-weight:400;color:var(--muted)">
-                     댓글 ${num(s.total)}건</span></div>
-               </div>`
-            : ""
-        }
-        ${
-          남은시간 !== null
-            ? `<div>
-                 <div style="font-size:12px;color:var(--muted)">남은 큐를 다 보면</div>
-                 <div style="font-size:20px;font-weight:700">${남은시간.toFixed(1)}시간
-                   <span style="font-size:12px;font-weight:400;color:var(--muted)">
-                     ${num(s.unreviewed)}건</span></div>
-               </div>`
-            : ""
-        }
+        <div>
+          <div style="font-size:12px;color:var(--muted)">검토 대기</div>
+          <div style="font-size:20px;font-weight:700">${num(s.unreviewed)}건</div>
+        </div>
       </div>
-      <div class="note" style="margin-top:14px">건당 시간은 <b>실제로 잰 값</b>입니다
-        (연속으로 처리한 구간만, 중앙값). 위험도 높은 순으로 정렬돼 있어
-        위에서부터 일부만 보셔도 대부분을 막을 수 있습니다.</div>
+    </div>`;
+}
+
+/** 자동 감시가 살아 있는지. JSON 을 읽게 하지 않는다.
+ *
+ *  /api/health/watch 를 브라우저로 열면 {"errors": []} 가 보이는데, 그걸
+ *  오류로 읽은 사람이 실제로 있었다. 관리자가 봐야 하는 건 세 가지다 —
+ *  돌고 있나, 마지막에 언제 돌았나, 오늘 돈을 얼마나 썼나.
+ */
+function 감시상태(w) {
+  if (!w) return "";
+  if (!w.enabled)
+    return `<div class="note" style="margin-bottom:16px;border-color:var(--critical)">
+      자동 감시가 꺼져 있습니다 (WATCH_ENABLED=false). 새 댓글이 들어오지 않습니다.</div>`;
+
+  const r = w.last_result;
+  const 언제 = w.last_run_at ? ago(w.last_run_at) : "아직 안 돌았습니다 (서버 시작 90초 뒤 첫 실행)";
+  const 오류 = r?.errors?.length
+    ? `<span style="color:var(--critical)"> · 오류 ${r.errors.length}건: ${esc(r.errors[0])}</span>`
+    : "";
+  const 건너뜀 = r?.skipped?.length
+    ? `<span style="color:var(--critical)"> · ${esc(r.skipped[0])}</span>`
+    : "";
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h2>자동 감시 <span style="font-size:12px;font-weight:500;color:var(--ok)">● 켜짐</span></h2>
+      <div style="display:flex;gap:28px;flex-wrap:wrap;margin-top:10px;font-size:13px">
+        <div><div style="font-size:12px;color:var(--muted)">마지막 실행</div>
+          <div style="font-weight:600">${esc(언제)}</div></div>
+        ${r ? `
+        <div><div style="font-size:12px;color:var(--muted)">그때 한 일</div>
+          <div style="font-weight:600">채널 ${num(r.channels)}개 · 새 댓글 ${num(r.collected)}건 · 판별 ${num(r.judged)}건</div></div>` : ""}
+        <div><div style="font-size:12px;color:var(--muted)">오늘 AI 호출</div>
+          <div style="font-weight:600">${num(w.llm_calls_today)} / ${num(w.llm_daily_cap)}건</div></div>
+        <div><div style="font-size:12px;color:var(--muted)">주기</div>
+          <div style="font-weight:600">${Math.round(w.interval_seconds / 60)}분마다 · 채널당 최신 영상 ${w.videos_per_channel}개</div></div>
+      </div>
+      <div class="note" style="margin-top:12px">연동하고 AI 판별에 동의한 채널만 봅니다.
+        새 댓글이 없으면 판별도 없고 비용도 없습니다.${오류}${건너뜀}</div>
     </div>`;
 }
 
@@ -188,7 +239,10 @@ async function viewDashboard() {
   const PERIODS = ["today", "7d", "30d", "all"];
   const saved = localStorage.getItem("period");
   const period = PERIODS.includes(saved) ? saved : "all";
-  const s = await api(`/channels/${channelId()}/stats?period=${period}`);
+  const [s, w] = await Promise.all([
+    api(`/channels/${channelId()}/stats?period=${period}`),
+    api("/health/watch").catch(() => null),
+  ]);
   const judged = s.total - s.pending;
   const pct = (n) => (judged ? (n / judged) * 100 : 0);
 
@@ -219,9 +273,10 @@ async function viewDashboard() {
         <div class="h">그대로 공개</div></div>
       <div class="card stat"><div class="l">검토 전환율</div>
         <div class="n">${(s.review_rate * 100).toFixed(1)}<span style="font-size:16px">%</span></div>
-        <div class="h">목표 30% 이하</div></div>
+        <div class="h">판별한 것 중 큐로 온 비율 · 목표 30% 이하</div></div>
     </div>
 
+    ${감시상태(w)}
     ${일한양(s)}
 
     <div class="split">
@@ -239,6 +294,7 @@ async function viewDashboard() {
         </div>
         ${s.pending
           ? `<div class="note" style="margin-top:14px">아직 판별하지 않은 댓글이 ${num(s.pending)}건 있습니다.
+             연동·동의된 채널이면 서버가 매시간 자동으로 판별합니다. 지금 바로 하려면
              <code>python -m scripts.run_pipeline --channel ${channelId()} --save</code></div>`
           : ""}
       </div>
@@ -329,7 +385,11 @@ async function renderDetail(x) {
       </div>
 
       <div class="acts">
-        <button class="danger" data-act="hide">숨김 처리</button>
+        ${/* 이미 가려진 댓글에 [숨김 처리] 를 또 보여주면, 눌렀을 때 아무
+              일도 안 일어나는 버튼이 된다. 할 수 있는 것만 남긴다. */ ""}
+        ${x.status === "hidden"
+          ? ""
+          : `<button class="danger" data-act="hide">숨김 처리</button>`}
         <button data-act="ban_author">채널 차단</button>
         <button class="good" data-act="keep">${
           x.status === "hidden" ? "복구(공개)" : "유지(정상)"
@@ -372,10 +432,11 @@ let rows = [];
 let selected = null;
 
 async function act(id, action) {
-  const actor = localStorage.getItem("actor") || "관리자";
+  // 조치자는 보내지 않는다. 서버가 로그인 세션에서 읽는다 — 화면이 보낸
+  // 이름을 믿으면 남의 이름으로 기록을 남길 수 있다.
   await api(`/comments/${id}/action`, {
     method: "POST",
-    body: JSON.stringify({ action, actor }),
+    body: JSON.stringify({ action }),
   });
   toast({ hide: "숨김 처리했습니다", keep: "유지했습니다", ban_author: "채널 차단했습니다" }[action]);
   // 처리한 건은 목록에서 빠진다. 다음 건으로 자동으로 넘어가야 손이 안 멈춘다.
@@ -468,12 +529,13 @@ async function viewList(kind) {
     <div class="sub">${esc(channelName())} · <span id="count"></span>${
       isQueue
         ? " · 위험도 높은 순, 같은 등급이면 많이 퍼진 순"
-        : " · 자동으로 가려진 댓글입니다"
+        : " · 지금 유튜브에서 가려져 있는 댓글입니다"
     }</div>
     ${isQueue
       ? ""
-      : `<div class="note" style="margin-bottom:14px">자동 숨김은 관리자를 거치지 않은 조치입니다.
-         정상 댓글이 잘못 가려졌으면 <b>복구(공개)</b>로 되돌리세요.</div>`}
+      : `<div class="note" style="margin-bottom:14px">여기 있는 댓글은 유튜브에서
+         시청자에게 보이지 않습니다. 잘못 가렸다면 <b>복구(공개)</b>를 누르세요 —
+         유튜브에 다시 공개되고, 검토 큐로 돌아가 다시 판단할 수 있습니다.</div>`}
     <div class="split">
       <div class="card"><div class="list" id="list"></div></div>
       <div id="detail"></div>
@@ -733,8 +795,10 @@ async function viewHistory() {
           )
           .join("")}
       </table>
-      <div class="note" style="margin-top:14px">유튜브 실제 반영은 채널 소유자 인증(OAuth)이 필요합니다.
-        지금은 우리 DB 에만 기록됩니다.</div>`
+      <div class="note" style="margin-top:14px"><b>반영됨</b>은 유튜브에서 실제로
+        가려지거나 다시 공개됐다는 뜻입니다. <b>미반영</b>은 우리 기록에만 남은
+        것으로, 채널을 아직 연동하지 않았거나 유튜브 호출이 실패한 경우입니다
+        (실패했다면 메모에 이유가 적힙니다).</div>`
         : `<div class="empty">아직 처리한 댓글이 없습니다.</div>`}
     </div>`;
 }
@@ -829,12 +893,12 @@ async function viewChannels() {
 
   view.innerHTML = `
     <h1>채널 관리</h1>
-    <div class="sub">연동한 채널만 댓글을 수집하고 조치할 수 있습니다</div>
+    <div class="sub">유튜브 권한이 있어야 숨김이 실제로 반영됩니다</div>
     ${알림}
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;
                   margin-bottom:14px">
-        <h2 style="margin:0">연동된 채널 ${list.length}개</h2>
+        <h2 style="margin:0">채널 ${list.length}개</h2>
         <button class="slim" id="connect" style="flex:0 0 auto">+ 채널 연결</button>
       </div>
       <div id="chlist"></div>
@@ -868,9 +932,20 @@ async function viewChannels() {
               c.agreed
                 ? `<span style="color:var(--ok)">AI 판별 동의함</span>`
                 : `<span style="color:var(--critical)">동의 전 — 판별이 돌지 않습니다</span>`
+            } ·
+            ${
+              c.connected
+                ? `<span style="color:var(--ok)">유튜브 권한 있음</span>`
+                : `<span style="color:var(--critical)">유튜브 권한 없음 — 숨김이 반영되지 않습니다</span>`
             }
           </div>
         </div>
+        ${
+          c.connected
+            ? ""
+            : `<button class="slim" data-link="${c.id}"
+                       style="flex:0 0 auto">유튜브 연동</button>`
+        }
         <button class="slim" data-consent="${c.id}" data-now="${c.agreed}"
                 style="flex:0 0 auto">${c.agreed ? "동의 철회" : "AI 판별 동의"}</button>
         <button class="slim danger" data-off="${c.id}"
@@ -880,6 +955,10 @@ async function viewChannels() {
         .join("")
     : `<div class="empty" style="padding:24px">연동된 채널이 없습니다.<br>
          위 [+ 채널 연결]로 시작하세요.</div>`;
+
+  view.querySelectorAll("[data-link]").forEach((b) => {
+    b.onclick = () => (location.href = "/api/channels/connect/start");
+  });
 
   view.querySelectorAll("[data-consent]").forEach((b) => {
     b.onclick = async () => {
@@ -984,12 +1063,14 @@ async function route() {
     document.querySelectorAll(".nav-item").forEach((a) => {
       a.classList.toggle("on", a.getAttribute("href") === hash);
     });
+    연동배너();
     return showNoChannel();
   }
   document.querySelectorAll(".nav-item").forEach((a) => {
     a.classList.toggle("on", a.getAttribute("href") === hash);
   });
   stopRefresh();
+  연동배너();
   try {
     await ROUTES[hash]();
   } catch (e) {

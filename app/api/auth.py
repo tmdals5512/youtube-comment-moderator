@@ -4,7 +4,7 @@
 채널을 붙일 데가 없어서, 가입 직후에 아무것도 못 하게 된다.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
@@ -79,11 +79,15 @@ async def callback(
 ):
     cfg = _require_oauth()
 
+    # 여기서 400 JSON 을 던지면 브라우저에 {"detail": ...} 가 그대로 뜬다.
+    # 로그인을 취소했거나 서버가 재시작돼 state 가 날아간 사람이 보는 첫
+    # 화면이 그거면 안 된다. 채널 연동 쪽(connect_callback)은 이미 화면으로
+    # 돌려보내고 있었는데 로그인만 빠져 있었다.
     data = goog.states.take(state)
     if data is None or data.get("kind") != "login":
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "state 가 유효하지 않습니다")
+        return RedirectResponse("/app?login_error=state")
     if error or not code:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"로그인이 취소됐습니다 ({error})")
+        return RedirectResponse(f"/app?login_error={error or 'cancelled'}")
 
     tokens = await goog.exchange_code(
         cfg.google_client_id, cfg.google_client_secret, code, _redirect_uri()
@@ -122,14 +126,22 @@ async def _upsert_user(db: AsyncSession, p: goog.GoogleProfile) -> User:
             await db.execute(select(User).where(User.email == p.email))
         ).scalar_one_or_none()
 
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
     if user is None:
         user = User(email=p.email, name=p.name, google_id=p.sub, picture=p.picture)
         db.add(user)
         await db.flush()
     else:
         user.google_id = p.sub
-        user.email = p.email
+        # 이메일은 다른 계정이 이미 쓰고 있을 수 있다 (수동으로 만든 계정,
+        # 또는 구글에서 이메일을 바꾼 경우). 그대로 덮어쓰면 unique 제약에
+        # 걸려 로그인 자체가 500 으로 죽는다. 비어 있을 때만 옮긴다.
+        if user.email != p.email:
+            taken = (
+                await db.execute(select(User.id).where(User.email == p.email))
+            ).scalar_one_or_none()
+            if taken is None:
+                user.email = p.email
         user.name = p.name or user.name
         user.picture = p.picture or user.picture
     user.last_login_at = now
@@ -184,7 +196,7 @@ async def dev_login(
         user = User(email=DEV_EMAIL, name="개발자")
         db.add(user)
         await db.flush()
-    user.last_login_at = datetime.utcnow()
+    user.last_login_at = datetime.now(UTC).replace(tzinfo=None)
 
     await _ensure_workspace(db, user)
     await db.flush()
@@ -262,7 +274,6 @@ async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, summary="로그아웃")
 async def logout(
     response: Response,
-    outlier_session: str | None = None,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):

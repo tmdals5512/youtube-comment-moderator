@@ -1,7 +1,7 @@
 """ORM 모델."""
 
 import secrets
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import (
     Boolean,
@@ -91,7 +91,7 @@ class Session(Base):
 
     @staticmethod
     def new(user_id: int, days: int = SESSION_DAYS) -> "Session":
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         return Session(
             # 32바이트 난수. 추측으로 남의 세션을 맞힐 수 없어야 한다.
             token=secrets.token_urlsafe(32)[:64],
@@ -129,10 +129,13 @@ class Channel(Base):
     # 그 채널에 쓰기가 가능한 상태가 된다.
     youtube_refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # 이 채널에서 쓰이는 표현을 LLM 에게 알려주는 문장들.
-    # 예: "ㄹㅈㄷ : '레전드'의 초성. 감탄 표현이며 비하가 아니다."
-    # 프롬프트 맨 뒤에 붙는다 — 앞부분이 고정이어야 캐싱이 걸리기 때문.
-    # 관리자가 직접 쓰는 게 아니라, 검토 이력에서 패턴을 찾아 시스템이 제안한다.
+    # 이 채널에서만 통하는 판단 기준. 프롬프트 맨 뒤에 붙는다 — 앞부분이
+    # 고정이어야 캐싱이 걸리기 때문.
+    #
+    # 지금은 사람이 쓴다. 관리자 조치 이력을 그대로 프롬프트에 넣어 대신하게
+    # 하는 건 재봤는데 안 됐다 (사례 5건 → 6/9, 사람이 쓴 규칙 → 9/9, 둘을
+    # 합치면 도로 6/9). 사례에서 규칙을 뽑는 단계가 따로 있어야 하고, 그건
+    # 아직 없다.
     context: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # 이 채널이 사람을 안 거치고 바로 가리기로 정한 분류. 콤마로 구분한다.
@@ -218,7 +221,7 @@ class Video(Base):
 
 
 class Comment(Base):
-    """수집된 댓글 (F_R_107). MVP①에서는 판정 테스트 입력으로만 쓴다."""
+    """수집된 댓글 (F_R_107)."""
 
     __tablename__ = "comments"
 
@@ -320,8 +323,9 @@ class RiskAssessment(Base):
 class Action(Base):
     """관리자 조치 이력 (F_R_115).
 
-    실제 유튜브 반영은 채널 소유자 OAuth 가 있어야 한다. 지금은 우리 채널이
-    없어서 DB 에만 기록한다 — youtube_synced 가 그 구분이다.
+    유튜브 반영은 채널 소유자가 OAuth 로 연동한 채널에서만 된다. 연동 안 된
+    채널(API 키로 수집만 한 것)은 DB 에만 기록된다 — youtube_synced 가 그
+    구분이다.
     """
 
     __tablename__ = "actions"
@@ -335,7 +339,8 @@ class Action(Base):
     actor: Mapped[str | None] = mapped_column(String(100), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # 유튜브에 실제로 반영됐는지. OAuth 붙기 전까지는 항상 False.
+    # 유튜브에 실제로 반영됐는지. 미연동 채널이거나 호출이 실패하면 False 고,
+    # 그 이유는 note 에 남는다.
     youtube_synced: Mapped[bool] = mapped_column(Boolean, default=False)
 
     executed_at: Mapped[datetime | None] = mapped_column(

@@ -287,3 +287,158 @@ class TestActorIsServerSide:
         actors = [h["actor"] for h in hist.json()]
         assert "a@test.local" in actors
         assert "남의이름@test.local" not in actors
+
+
+# ── 화면의 버튼이 진짜 로그인으로 가는가 ──────────────────────────
+#
+# 백엔드가 멀쩡해도 첫 화면 버튼이 시안 다음 장을 가리키고 있으면
+# 사용자 입장에선 "구글 로그인이 안 되는" 것이다. 실제로 그랬다.
+
+
+def _screen(name: str) -> str:
+    from pathlib import Path
+
+    import app.main as m
+
+    return (Path(m.__file__).parent / "static" / "screens" / name).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_첫화면_구글버튼은_진짜_로그인으로_간다():
+    assert '"/api/auth/start"' in _screen("1-login.html")
+
+
+def test_채널연결화면_버튼은_진짜_연동으로_간다():
+    assert '"/api/channels/connect/start"' in _screen("3-connect.html")
+
+
+def test_온보딩_화면은_없는_스크립트를_부르지_않는다():
+    for n in ("1-login.html", "2-signup.html", "3-connect.html",
+              "4-select.html", "5-consent.html", "6-done.html"):
+        assert "support.js" not in _screen(n), n
+
+
+def test_로그인은_계정을_고르게_한다():
+    """prompt 가 없으면 구글이 묻지도 않고 되돌려보낸다 — 실제로 겪었다."""
+    from app.services import google_oauth as g
+
+    url = g.authorize_url("cid", "http://localhost:8000/cb", g.LOGIN_SCOPES, "st")
+    assert "prompt=select_account" in url
+
+
+def test_채널_연동은_동의를_다시_받는다():
+    """refresh_token 을 확실히 받으려면 consent 여야 한다."""
+    from app.services import google_oauth as g
+
+    url = g.authorize_url(
+        "cid", "http://localhost:8000/cb", g.YOUTUBE_SCOPES, "st", offline=True
+    )
+    assert "prompt=consent" in url and "access_type=offline" in url
+
+
+# ── 이번 점검에서 찾은 구멍들 ──────────────────────────────────
+
+
+class TestModerationCheck:
+    """/api/moderation/check 는 channel_id 를 본문으로 받아서 require_channel
+    을 못 쓴다. 그래서 검사가 빠져 있었고, 로그인 없이 아무 채널의 등록어를
+    matched_pattern 으로 읽을 수 있었다."""
+
+    async def test_anonymous_is_rejected(self, client, world):
+        r = await client.post(
+            "/api/moderation/check",
+            json={"channel_id": world["a"]["channel"], "text": "아무 말"},
+        )
+        assert r.status_code == 401
+
+    async def test_other_channel_is_invisible(self, client, world):
+        r = await client.post(
+            "/api/moderation/check",
+            json={"channel_id": world["a"]["channel"], "text": "아무 말"},
+            cookies=as_(world["b"]["token"]),
+        )
+        assert r.status_code == 404
+
+    async def test_own_channel_works(self, client, world):
+        r = await client.post(
+            "/api/moderation/check",
+            json={"channel_id": world["a"]["channel"], "text": "아무 말"},
+            cookies=as_(world["a"]["token"]),
+        )
+        assert r.status_code == 200
+        assert r.json()["verdict"] == "pass"
+
+
+class TestLoginCallbackErrors:
+    """구글에서 실패하고 돌아오면 JSON 이 아니라 화면으로 가야 한다."""
+
+    async def test_cancel_redirects_to_login_screen(self, client, monkeypatch):
+        from app.core.config import get_settings
+        from app.services import google_oauth as goog
+
+        cfg = get_settings()
+        monkeypatch.setattr(cfg, "google_client_id", "cid")
+        monkeypatch.setattr(cfg, "google_client_secret", "sec")
+
+        state = goog.states.issue(kind="login", next="/app")
+        r = await client.get(
+            f"/api/auth/google/callback?state={state}&error=access_denied",
+            follow_redirects=False,
+        )
+        assert r.status_code in (302, 307)
+        assert r.headers["location"] == "/app?login_error=access_denied"
+
+    async def test_bad_state_redirects_to_login_screen(self, client, monkeypatch):
+        from app.core.config import get_settings
+
+        cfg = get_settings()
+        monkeypatch.setattr(cfg, "google_client_id", "cid")
+        monkeypatch.setattr(cfg, "google_client_secret", "sec")
+
+        r = await client.get(
+            "/api/auth/google/callback?state=없는값&code=x", follow_redirects=False
+        )
+        assert r.status_code in (302, 307)
+        assert r.headers["location"] == "/app?login_error=state"
+
+
+class TestRuleInput:
+    async def test_blank_rule_is_422_not_500(self, client, world):
+        """공백만 있는 단어. min_length 는 통과하고 정규식 만들 때 터졌다."""
+        r = await client.post(
+            f"/api/channels/{world['a']['channel']}/rules",
+            json={"rule_value": "   ", "action": "block", "expand_variants": True},
+            cookies=as_(world["a"]["token"]),
+        )
+        assert r.status_code == 422
+
+
+class TestStats:
+    async def test_review_rate_excludes_pending(self, client, world):
+        """아직 판별 안 한 댓글은 분모에서 뺀다.
+
+        큐 1건 + 판별 안 한 1건이면 전환율은 1/1 이지 1/2 가 아니다.
+        pending 을 넣으면 판별을 덜 한 채널이 더 잘 걸러진 것처럼 보인다.
+        """
+        async with AsyncSessionLocal() as db:
+            db.add(
+                Comment(
+                    channel_id=world["a"]["channel"],
+                    youtube_comment_id="cmt-a-pending",
+                    content="아직 안 본 것",
+                    status="pending",
+                )
+            )
+            await db.commit()
+
+        r = await client.get(
+            f"/api/channels/{world['a']['channel']}/stats",
+            cookies=as_(world["a"]["token"]),
+        )
+        assert r.status_code == 200
+        s = r.json()
+        assert s["pending"] == 1 and s["queued"] == 1
+        assert s["review_rate"] == 1.0
+        # 시간 추정치는 더 내보내지 않는다.
+        assert "seconds_per_item" not in s["workload"]

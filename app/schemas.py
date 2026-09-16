@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Action = Literal["block", "review", "allow"]
 
@@ -14,6 +14,17 @@ class RuleCreate(BaseModel):
     )
     action: Action = Field("block", description="block=즉시 차단 / review=보류 / allow=예외")
     expand_variants: bool = Field(True, description="초성·공백·특수문자 변형까지 잡을지")
+
+    @field_validator("rule_value")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        # min_length 는 공백도 글자로 센다. "  " 가 여기를 통과하면 정규식을
+        # 만드는 단계에서 ValueError 가 나고, 그게 잡히지 않아 500 이 된다.
+        # 입력 오류(422)여야 할 것이 서버 오류로 보이는 건 곤란하다.
+        v = v.strip()
+        if not v:
+            raise ValueError("빈 단어는 등록할 수 없습니다")
+        return v
 
 
 class RuleUpdate(BaseModel):

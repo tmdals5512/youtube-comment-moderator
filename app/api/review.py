@@ -2,11 +2,12 @@
 
 관리자가 실제로 쓰는 화면이 읽는 API 다. 설계 전제 두 가지.
 
-  1. 관리자는 전부 못 본다. 그래서 큐는 '확산도(좋아요+답글) 높은 순'으로
-     준다 — 같은 유해댓글이라도 많이 퍼진 것부터 처리해야 피해가 준다.
+  1. 관리자는 전부 못 본다. 그래서 큐는 위험도 순, 같은 위험도 안에서는
+     확산도(좋아요+답글) 높은 순으로 준다 — 많이 퍼진 것부터 처리해야
+     피해가 준다.
 
-  2. 숨김 목록은 반드시 열어볼 수 있어야 한다. 자동으로 가려진 것을
-     관리자가 되돌릴 통로가 없으면 오탐이 영원히 안 보인다.
+  2. 숨김 목록은 반드시 열어볼 수 있어야 한다. 가린 것을 되돌릴 통로가
+     없으면 잘못 가린 게 영원히 안 보인다.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -18,7 +19,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy import text as sq
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import current_user, require_channel, require_comment, require_role
+from app.core.deps import current_user, require_channel, require_comment
 from app.db.models import Action, Channel, Comment, RiskAssessment, User, Video
 from app.db.session import get_db
 from app.services import youtube_actions as yt
@@ -31,14 +32,16 @@ ActionType = Literal["hide", "keep", "ban_author"]
 ACTION_STATUS = {"hide": "hidden", "keep": "passed", "ban_author": "hidden"}
 
 # 카테고리 -> 위험도.
-# 자동 숨김을 '욕설' 하나로 좁힌 뒤로는 거의 모든 판정이 검토 큐로 온다.
-# 관리자가 178건을 위에서부터 훑는다면 무엇을 먼저 보여줄지가 중요해진다.
 #
-# critical 은 '늦으면 되돌릴 수 없는 것'으로 잡았다.
-#   신상털기·위협 = 채널이 법적 책임을 지는 유형
-#   자해         = 사람이 다칠 수 있어 대응 시급성이 가장 높다
-# 나머지는 해악의 크기순이다. 모욕이 medium 인 것은 판단이 갈리기 때문이지
-# 가벼워서가 아니다 — 어디까지가 모욕인지는 채널이 정할 문제다.
+# 이 표는 개발자가 정한 것이고 관리자에게 물어본 적이 없다. 실데이터에서
+# 큐의 65% 가 '모욕 = medium' 한 칸에 몰려서, 4단계로 나눠놨지만 실제로는
+# 순서가 거의 안 매겨진다. 카테고리는 같아도 무게는 다른데("롤 개못하네 ㅋㅋ"
+# 와 "가정교육 독학하신 티가 나네요" 가 같은 모욕이다) 표가 그 차이를 버린다.
+#
+# 다음 단계는 이 표를 없애고 댓글을 읽은 LLM 이 위험도를 직접 매기게 하는
+# 것이다. 그 등급의 뜻(긴급이 뭔지)은 팀이 써야 해서, 정해지기 전까지는
+# 이 표를 그대로 쓴다. 정해지면 SEVERITY 를 지우고 risk_assessments 에
+# severity 컬럼을 두면 된다.
 SEVERITY = {
     "신상털기": "critical", "위협": "critical", "자해": "critical",
     "혐오": "high", "성희롱": "high", "욕설": "high",
@@ -48,10 +51,6 @@ SEVERITY = {
 RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 BY_RANK = {v: k for k, v in RANK.items()}
 
-# 좋아요+답글이 이만큼 넘으면 한 단계 올린다. 같은 표현이라도 많이 퍼진 쪽이
-# 실제 피해가 크고, 관리자가 늦게 볼수록 손해가 누적된다.
-SPREAD_BUMP = 100
-
 
 def _spread():
     return func.coalesce(Comment.like_count, 0) + func.coalesce(
@@ -60,19 +59,33 @@ def _spread():
 
 
 def _severity_rank():
-    """카테고리를 위험도 순위로 바꾸고, 확산도가 높으면 한 단계 올린다."""
+    """카테고리를 위험도 순위로 바꾸고, 애매 판정은 한 단계 내린다.
+
+    확산도로 등급을 올리는 규칙(SPREAD_BUMP=100)은 뺐다. 100 이라는 값에
+    근거가 없었다 — 진용진 큐 865건 중 38건(4.4%)만 넘었고, 왜 4% 여야
+    하는지 아무도 정한 적이 없다. 확산도는 같은 등급 안에서 순서를 가르는
+    데는 계속 쓴다 (_rows 의 order_by).
+
+    애매를 내리는 이유: AI 가 '애매하다'고 한 것은 유해하다고 확정한 것과
+    같은 무게일 수 없다. 전에는 label 을 아예 안 봐서 '혐오로 볼 수도 있다'
+    정도의 판정이 확정된 혐오와 나란히 올라왔다. 내리기만 하고 숨기지는
+    않는다 — 순서가 뒤로 갈 뿐 사람이 반드시 본다.
+    """
     base = case(
         {k: RANK[v] for k, v in SEVERITY.items()},
         value=RiskAssessment.category,
         else_=RANK["medium"],
     )
-    return case((_spread() >= SPREAD_BUMP, func.greatest(base - 1, 0)), else_=base)
+    return case(
+        (RiskAssessment.risk_level == "ambiguous", func.least(base + 1, RANK["low"])),
+        else_=base,
+    )
 
 
 class QueueItem(BaseModel):
     comment_id: int
     severity: Literal["critical", "high", "medium", "low"] = Field(
-        ..., description="처리 우선순위. 카테고리 + 확산도로 정한다"
+        ..., description="처리 우선순위. 카테고리로 정하고 애매 판정은 한 단계 내린다"
     )
 
     channel_title: str | None
@@ -124,20 +137,15 @@ def _since(period: str):
 
 
 class Workload(BaseModel):
-    """관리자가 실제로 얼마나 일했나. 전부 실측이다.
+    """관리자가 실제로 처리한 건수. 세는 값만 둔다.
 
-    '몇 시간 아꼈다' 는 넣지 않는다. 안 썼을 때 몇 시간 걸렸을지는 관측할
-    수 없어서, 그건 추정이지 측정이 아니다. 대신 잰 값만 보여주고 판단은
-    보는 사람에게 맡긴다.
+    '건당 몇 초'와 '전부 보면 몇 시간'을 여기서 내보냈었다. 조치 기록 사이의
+    시간 간격 중앙값이었는데, 그 기록은 개발 중에 우리가 누른 것이라 관리자
+    판단 시간이 아니었다. 실제로 관리자는 대개 5초도 안 걸린다고 한다.
+    잰 게 아닌 숫자를 '실측'이라고 화면에 띄우고 있었다. 뺐다.
     """
 
     reviewed: int = Field(..., description="관리자가 실제로 처리한 건수")
-    seconds_per_item: float | None = Field(
-        None, description="건당 처리 시간(초). 실측 중앙값"
-    )
-    all_comments_hours: float | None = Field(
-        None, description="이 속도로 전체 댓글을 다 봤다면 걸렸을 시간"
-    )
     seen_ratio: float = Field(..., description="전체 중 관리자가 본 비율")
 
 
@@ -150,7 +158,11 @@ class Stats(BaseModel):
     queued: int
     hidden: int
     unreviewed: int = Field(..., description="큐에 남아 관리자를 기다리는 건수")
-    review_rate: float = Field(..., description="검토 전환율. NF_R_104 목표 30% 이하")
+    review_rate: float = Field(
+        ...,
+        description="검토 전환율 = 검토 큐 / 판별한 것. NF_R_104 목표 30% 이하. "
+        "아직 판별 안 한(pending) 댓글은 분모에서 뺀다",
+    )
     by_category: dict[str, int]
     workload: Workload
 
@@ -277,6 +289,19 @@ async def act(
     comment_id = comment.id
     now = datetime.now(UTC).replace(tzinfo=None)
 
+    # 이미 가려진 걸 또 가리면 이력만 한 줄 더 생기고 유튜브에는 아무 변화가
+    # 없다. 화면은 버튼을 안 보여주지만 API 는 막혀 있지 않았다.
+    if payload.action == "hide" and comment.status == "hidden":
+        raise HTTPException(status.HTTP_409_CONFLICT, "이미 가려진 댓글입니다")
+
+    # 숨겼던 걸 [복구(공개)] 한 것인지. 같은 keep 이라도 뜻이 다르다.
+    #   검토 큐에서 누른 keep  = "봤는데 정상이다"      -> 판단 끝, 통과
+    #   숨김 목록에서 누른 keep = "이건 숨기면 안 됐다"  -> 되돌리기
+    # 되돌리기를 통과로 처리하면 그 댓글이 어느 화면에도 안 남는다.
+    # 숨김 목록에서도 빠지고 검토 큐에도 없어서, 잘못 숨겼다가 되돌린
+    # 댓글을 다시 볼 방법이 사라진다. 아직 판단하지 않은 상태로 돌린다.
+    되돌림 = payload.action == "keep" and comment.status == "hidden"
+
     # 유튜브에 실제로 반영한다. 채널 소유자가 연동하지 않았으면 토큰이
     # 없어서 DB 에만 기록된다 — youtube_synced 가 그 구분이다.
     #
@@ -293,7 +318,7 @@ async def act(
             r = await yt.ban_author(
                 channel.youtube_refresh_token, comment.youtube_comment_id
             )
-        elif comment.status == "hidden":  # keep — 숨겼던 것을 되돌린다
+        elif 되돌림:  # keep — 숨겼던 것을 다시 공개한다
             r = await yt.set_moderation(
                 channel.youtube_refresh_token,
                 [comment.youtube_comment_id],
@@ -327,8 +352,14 @@ async def act(
             executed_at=now,
         )
     )
-    comment.status = ACTION_STATUS[payload.action]
-    comment.reviewed_at = now
+    if 되돌림:
+        # 검토 큐는 status=queued 와 reviewed_at IS NULL 둘 다 본다.
+        # 하나만 되돌리면 어느 목록에도 안 뜬다.
+        comment.status = "queued"
+        comment.reviewed_at = None
+    else:
+        comment.status = ACTION_STATUS[payload.action]
+        comment.reviewed_at = now
     await db.commit()
 
     return ActionResult(
@@ -401,53 +432,27 @@ async def stats(
     )
 
     queued = counts.get("queued", 0)
+    pending = counts.get("pending", 0)
+    # 아직 판별하지 않은 댓글은 검토 큐에 갈지 통과할지 정해지지 않았다.
+    # 분모에 넣으면 전환율이 낮아 보인다 — 채널 1 은 761건이 전부 pending
+    # 이라 0% 로 나왔는데, 그건 잘 걸러진 게 아니라 아직 안 본 것이다.
+    judged = total - pending
     return Stats(
         channel_id=channel_id,
         period=period,
         total=total,
-        pending=counts.get("pending", 0),
+        pending=pending,
         passed=counts.get("passed", 0),
         queued=queued,
         hidden=counts.get("hidden", 0),
         unreviewed=unreviewed,
-        review_rate=round(queued / total, 4) if total else 0.0,
+        review_rate=round(queued / judged, 4) if judged else 0.0,
         by_category=by_category,
         workload=await _workload(db, channel_id, total),
     )
 
 
-# 연속으로 처리한 것으로 볼 최대 간격. 이보다 오래 비면 자리를 뜬 것이다.
-# 실데이터에서 연속 구간은 3~180초였고, 중간에 16,318초짜리 공백도 있었다.
-REVIEW_GAP = 300
-
-
 async def _workload(db, channel_id: int, total: int) -> Workload:
-    """관리자의 실제 처리 속도. 가정하지 않고 잰다.
-
-    경쟁 서비스는 '댓글 1개 숨김 = 15초' 처럼 고정값을 쓴다. 그건 측정이
-    아니라 마케팅 숫자다. 사람마다, 댓글마다 다르다 — 짧은 건 3초, 긴 건
-    3분이 걸린다. 그래서 그 관리자가 실제로 쓴 시간을 쓴다.
-    """
-    간격 = (
-        await db.execute(
-            sq("""
-                SELECT EXTRACT(EPOCH FROM (a.executed_at - prev))::float AS gap
-                FROM (
-                  SELECT a.executed_at,
-                         lag(a.executed_at) OVER (
-                           PARTITION BY a.actor ORDER BY a.executed_at
-                         ) AS prev
-                  FROM actions a
-                  JOIN comments c ON c.id = a.comment_id
-                  WHERE c.channel_id = :cid
-                ) a
-                WHERE prev IS NOT NULL
-                  AND a.executed_at - prev < make_interval(secs => :gap)
-            """),
-            {"cid": channel_id, "gap": REVIEW_GAP},
-        )
-    ).scalars().all()
-
     처리 = (
         await db.execute(
             sq("""
@@ -457,18 +462,8 @@ async def _workload(db, channel_id: int, total: int) -> Workload:
             {"cid": channel_id},
         )
     ).scalar_one()
-
-    중앙값 = None
-    if 간격:
-        정렬 = sorted(간격)
-        중앙값 = round(정렬[len(정렬) // 2], 1)
-
     return Workload(
         reviewed=처리,
-        seconds_per_item=중앙값,
-        all_comments_hours=(
-            round(중앙값 * total / 3600, 1) if 중앙값 and total else None
-        ),
         seen_ratio=round(처리 / total, 4) if total else 0.0,
     )
 

@@ -229,3 +229,46 @@ class TestDisconnect:
         )
         assert r.status_code == 404
         assert (await _세기(세상["channel"]))["댓글"] == 3, "지워지면 안 된다"
+
+
+# ── 채널 목록이 '조치가 실제로 되는 채널'인지 알려주는가 ───────────
+#
+# 수집은 API 키만으로도 된다. 숨김을 유튜브에 반영하려면 채널 주인이
+# OAuth 로 준 리프레시 토큰이 있어야 한다. 이 구분이 화면에 안 보이면
+# 숨김을 눌러 놓고 반영된 줄 알게 된다.
+
+
+def test_토큰_없는_채널은_connected_가_거짓이다():
+    from app.api.channels import ChannelOut
+    from app.db.models import Channel
+
+    c = Channel(id=1, channel_title="수집만 한 채널", youtube_refresh_token=None)
+    assert (
+        ChannelOut(
+            id=c.id,
+            channel_title=c.channel_title,
+            connected=bool(c.youtube_refresh_token),
+        ).connected
+        is False
+    )
+
+
+def test_토큰_있는_채널은_connected_가_참이다():
+    from app.api.channels import ChannelOut
+    from app.db.models import Channel
+
+    c = Channel(id=2, channel_title="연동한 채널", youtube_refresh_token="rt")
+    assert (
+        ChannelOut(
+            id=c.id,
+            channel_title=c.channel_title,
+            connected=bool(c.youtube_refresh_token),
+        ).connected
+        is True
+    )
+
+
+def test_채널_목록은_토큰을_내보내지_않는다():
+    from app.api.channels import ChannelOut
+
+    assert "youtube_refresh_token" not in ChannelOut.model_fields
