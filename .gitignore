@@ -32,3 +32,6 @@ videos*.txt
 # 댓글 원문과 사람이 매긴 정답이 들어있다. eval/ 과 같은 이유로 레포에 넣지 않는다.
 labeling/
 labeling_*/
+
+# 배포 서버의 비밀값
+deploy/.env
