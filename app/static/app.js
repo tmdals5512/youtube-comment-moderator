@@ -392,7 +392,7 @@ async function renderDetail(x) {
           : `<button class="danger" data-act="hide">숨김 처리</button>`}
         <button data-act="ban_author">채널 차단</button>
         <button class="good" data-act="keep">${
-          x.status === "hidden" ? "복구(공개)" : "유지(정상)"
+          x.status === "hidden" ? "큐로 되돌리기" : "유지(정상)"
         }</button>
       </div>
     </div>`;
@@ -434,14 +434,25 @@ let selected = null;
 async function act(id, action) {
   // 조치자는 보내지 않는다. 서버가 로그인 세션에서 읽는다 — 화면이 보낸
   // 이름을 믿으면 남의 이름으로 기록을 남길 수 있다.
-  await api(`/comments/${id}/action`, {
+  const r = await api(`/comments/${id}/action`, {
     method: "POST",
     body: JSON.stringify({ action }),
   });
-  toast({ hide: "숨김 처리했습니다", keep: "유지했습니다", ban_author: "채널 차단했습니다" }[action]);
+  // 유튜브에 실제로 반영됐는지는 서버가 읽어서 정한다. 특히 가린 댓글의 되돌리기는
+  // 유튜브 API 가 받아만 주고 안 풀어준다 — 그걸 "유지했습니다" 로 덮으면 관리자는
+  // 공개된 줄 안다. 반영 안 됐으면 서버가 남긴 이유를 그대로 보여준다.
+  const 돼야하는데_안됨 = r.youtube_synced === false && r.note && /유튜브/.test(r.note);
+  toast(
+    돼야하는데_안됨
+      ? r.note.replace(/^\[|\]$/g, "")
+      : { hide: "숨김 처리했습니다", keep: "유지했습니다", ban_author: "채널 차단했습니다" }[action]
+  );
   // 처리한 건은 목록에서 빠진다. 다음 건으로 자동으로 넘어가야 손이 안 멈춘다.
   const i = rows.findIndex((r) => r.comment_id === id);
   rows.splice(i, 1);
+  // 전체 건수도 하나 줄인다. 안 줄이면 "4건 중 3건 표시" 가 되어 있지도 않은
+  // '1건 더 불러오기' 버튼이 다음 자동 갱신(20초)까지 떠 있다 — 리허설에서 봤다.
+  total = Math.max(total - 1, 0);
   selected = rows[Math.min(i, rows.length - 1)] || null;
   paint();
   refreshBadge();
@@ -534,8 +545,10 @@ async function viewList(kind) {
     ${isQueue
       ? ""
       : `<div class="note" style="margin-bottom:14px">여기 있는 댓글은 유튜브에서
-         시청자에게 보이지 않습니다. 잘못 가렸다면 <b>복구(공개)</b>를 누르세요 —
-         유튜브에 다시 공개되고, 검토 큐로 돌아가 다시 판단할 수 있습니다.</div>`}
+         시청자에게 보이지 않습니다. 잘못 가렸다면 <b>큐로 되돌리기</b>를 누르세요 —
+         우리 기록에서 검토 큐로 돌아가 다시 판단할 수 있습니다.<br>
+         <b>유튜브 API 는 한 번 가린 댓글을 되돌리지 못합니다.</b> 유튜브에서 다시
+         공개하려면 YouTube 스튜디오에서 직접 해야 합니다. 그래서 숨김은 신중해야 합니다.</div>`}
     <div class="split">
       <div class="card"><div class="list" id="list"></div></div>
       <div id="detail"></div>
@@ -796,9 +809,10 @@ async function viewHistory() {
           .join("")}
       </table>
       <div class="note" style="margin-top:14px"><b>반영됨</b>은 유튜브에서 실제로
-        가려지거나 다시 공개됐다는 뜻입니다. <b>미반영</b>은 우리 기록에만 남은
-        것으로, 채널을 아직 연동하지 않았거나 유튜브 호출이 실패한 경우입니다
-        (실패했다면 메모에 이유가 적힙니다).</div>`
+        가려졌다는 뜻입니다. <b>미반영</b>은 우리 기록에만 남은 것으로, 채널을 아직
+        연동하지 않았거나 유튜브 호출이 실패한 경우입니다 (메모에 이유가 적힙니다).
+        가린 댓글을 되돌리는 것은 유튜브 API 가 지원하지 않아 늘 미반영입니다 —
+        다시 공개하려면 YouTube 스튜디오에서 직접 해야 합니다.</div>`
         : `<div class="empty">아직 처리한 댓글이 없습니다.</div>`}
     </div>`;
 }

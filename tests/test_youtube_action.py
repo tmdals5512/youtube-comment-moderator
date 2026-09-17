@@ -36,6 +36,14 @@ pytestmark = pytest.mark.asyncio
 async def _ok(*a, **k):
     return yt.ActionResult(True)
 
+
+async def _true(*a, **k):
+    return True
+
+
+async def _false(*a, **k):
+    return False
+
 메일 = "yt@test.local"
 
 
@@ -224,10 +232,30 @@ class TestKeep:
             return yt.ActionResult(True)
 
         monkeypatch.setattr(yt, "set_moderation", 가짜)
+        monkeypatch.setattr(yt, "is_published", lambda *a, **k: _true())
         r = await _action(client, 세상, action="keep")
 
         assert 불린것["status"] == yt.PUBLISH
         assert r.json()["youtube_synced"] is True
+
+    async def test_복구는_유튜브가_안_풀어주면_미반영으로_남긴다(
+        self, client, 세상, monkeypatch
+    ):
+        """published 호출이 204 여도 댓글은 그대로 가려져 있을 수 있다 — 실제로
+        그렇다. 호출 성공을 반영으로 치면 관리자는 공개된 줄 안다."""
+        async with AsyncSessionLocal() as db:
+            c = await db.get(Comment, 세상["comment"])
+            c.status = "hidden"
+            await db.commit()
+
+        monkeypatch.setattr(yt, "set_moderation", lambda *a, **k: _ok())
+        monkeypatch.setattr(yt, "is_published", lambda *a, **k: _false())
+        r = await _action(client, 세상, action="keep")
+
+        body = r.json()
+        assert body["youtube_synced"] is False
+        assert "되돌리지 못" in (body["note"] or "")
+        assert body["status"] == "queued"          # 우리 기록은 큐로 돌아간다
 
     async def test_복구하면_검토_큐로_돌아간다(self, client, 세상, monkeypatch):
         """숨긴 걸 되돌리면 '아직 판단 안 함' 으로 가야 한다.
@@ -241,10 +269,8 @@ class TestKeep:
             c.reviewed_at = datetime(2020, 1, 1)
             await db.commit()
 
-        monkeypatch.setattr(
-            yt, "set_moderation",
-            lambda *a, **k: _ok(),
-        )
+        monkeypatch.setattr(yt, "set_moderation", lambda *a, **k: _ok())
+        monkeypatch.setattr(yt, "is_published", lambda *a, **k: _true())
         r = await _action(client, 세상, action="keep")
         assert r.json()["status"] == "queued"
 

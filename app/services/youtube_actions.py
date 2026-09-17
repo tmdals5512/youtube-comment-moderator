@@ -1,8 +1,13 @@
 """관리자 조치를 실제 유튜브에 반영한다 (F_R_115).
 
 [숨김] 을 누르면 여기를 거쳐 유튜브 댓글창에서 실제로 가려진다.
-실채널로 끝까지 확인했다 (2026-09-15, 숨김 → 시청자 조회에서 사라짐,
-복구 → 다시 보임).
+실채널로 확인했다 (2026-09-15, 숨김 → 시청자 조회에서 사라짐).
+
+**되돌리기는 안 된다.** setModerationStatus(published) 는 가려진 댓글에 대해
+204 를 돌려주면서 아무것도 하지 않는다. heldForReview 를 거쳐도 같다. 유튜브
+API 는 rejected 댓글을 읽을 수도 되돌릴 수도 없다 — 실채널로 세 번 확인했다
+(2026-09-16). 그래서 '복구' 는 우리 기록을 큐로 돌리는 것이고, 유튜브 쪽은
+읽어서 확인된 경우에만 반영됨으로 친다 (is_published).
 
 알아둘 것 두 가지.
 
@@ -92,6 +97,26 @@ async def set_moderation(
     if r.status_code in (200, 204):
         return ActionResult(True)
     return ActionResult(False, _hint(r.status_code, r.text))
+
+
+async def is_published(refresh_token: str | None, youtube_comment_id: str) -> bool:
+    """이 댓글이 지금 유튜브에서 공개 상태인가. 채널 주인 권한으로 읽는다.
+
+    setModerationStatus(published) 의 204 는 믿을 수 없다. 가려진 댓글에는
+    204 가 오고도 아무 변화가 없다. 그래서 복구는 호출이 성공했는지가 아니라
+    읽어서 실제로 보이는지로 판정한다.
+
+    유튜브 API 는 rejected 댓글을 어떤 방법으로도 돌려주지 않으므로, 여기서
+    안 나오면 여전히 가려진 것이다.
+    """
+    token = await _access_token(refresh_token)
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(
+            f"{API}/comments",
+            params={"part": "id", "id": youtube_comment_id},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    return bool(r.is_success and r.json().get("items"))
 
 
 async def ban_author(

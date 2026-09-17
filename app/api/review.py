@@ -318,12 +318,23 @@ async def act(
             r = await yt.ban_author(
                 channel.youtube_refresh_token, comment.youtube_comment_id
             )
-        elif 되돌림:  # keep — 숨겼던 것을 다시 공개한다
+        elif 되돌림:  # keep — 숨겼던 것을 다시 공개해 본다
             r = await yt.set_moderation(
                 channel.youtube_refresh_token,
                 [comment.youtube_comment_id],
                 yt.PUBLISH,
             )
+            # 유튜브는 가린 댓글을 API 로 되돌리지 못한다. published 호출이 204 를
+            # 돌려주고도 댓글은 그대로 가려져 있다 (실채널로 확인). 호출 성공을
+            # 반영으로 치면 관리자는 공개된 줄 안다. 실제로 보이는지 읽어서 정한다.
+            if r.ok and not await yt.is_published(
+                channel.youtube_refresh_token, comment.youtube_comment_id
+            ):
+                r = yt.ActionResult(
+                    False,
+                    "유튜브는 API 로 가린 댓글을 되돌리지 못합니다. 우리 기록만 검토 큐로 "
+                    "돌렸습니다. 유튜브에서 다시 공개하려면 YouTube 스튜디오에서 직접 해야 합니다.",
+                )
         else:
             # 원래 공개돼 있던 걸 [유지] 한 것이라 유튜브에서 할 일이 없다.
             # youtube_synced 를 True 로 두면 안 된다 — '반영됐다'가 아니라
