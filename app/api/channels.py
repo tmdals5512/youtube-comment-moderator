@@ -17,13 +17,16 @@ from app.core.deps import (
     require_channel,
 )
 from app.db.models import (
+    INVITE_DAYS,
     Action,
     Channel,
+    ChannelInvite,
     ChannelRule,
     Comment,
     RiskAssessment,
     User,
     Video,
+    Workspace,
 )
 from app.db.session import get_db
 from app.services import google_oauth as goog
@@ -60,6 +63,11 @@ class ChannelOut(BaseModel):
         description="유튜브 조치 권한(리프레시 토큰)이 있는지. "
         "없으면 숨김을 눌러도 우리 기록에만 남는다.",
     )
+    # 누가 언제 연결했는지. 채널 10개면 "이 채널은 누구 열쇠로 돌아가나" 가
+    # 헷갈리기 쉬워서 화면에 보여준다. 여기의 '누구' 는 우리 계정(로그인한 사람)이다.
+    # 유튜브 권한을 준 구글 계정 자체는 저장하지 않는다.
+    connected_at: datetime | None = None
+    connected_by: str | None = Field(None, description="연결을 누른 사람의 이메일")
 
 
 class CategoryOption(BaseModel):
@@ -133,6 +141,8 @@ async def connect_start(
             # 리프레시 토큰이 있어야 나중에도 조치를 할 수 있다.
             # 이게 없으면 1시간 뒤부터 숨김이 안 된다.
             offline=True,
+            # 로그인한 계정을 미리 골라둔다. 채널이 같은 계정에 있으면 한 번 클릭.
+            login_hint=user.email,
         )
     )
 
@@ -148,8 +158,16 @@ async def connect_callback(
     data = goog.states.take(state)
     if data is None or data.get("kind") != "connect":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "state 가 유효하지 않습니다")
+
+    # 초대 링크로 온 유튜버는 우리 사이트에 로그인이 없다. /app 으로 보내면
+    # 로그인 화면이 뜨니, 결과만 보여주는 공개 페이지로 돌려보낸다.
+    invite_id = data.get("invite_id")
+
+    def back(q: str) -> str:
+        return f"/connect/done?{q}" if invite_id else f"/app#/channels?{q}"
+
     if error or not code:
-        return RedirectResponse(f"/app#/channels?error={error or 'cancelled'}")
+        return RedirectResponse(back(f"error={error or 'cancelled'}"))
 
     tokens = await goog.exchange_code(
         cfg.google_client_id, cfg.google_client_secret, code, _connect_uri()
@@ -157,14 +175,14 @@ async def connect_callback(
     if not tokens.refresh_token:
         # prompt=consent 를 줬는데도 안 오면, 이미 허용해둔 상태다.
         # 구글 계정 설정에서 접근을 지우고 다시 해야 한다.
-        return RedirectResponse("/app#/channels?error=no_refresh_token")
+        return RedirectResponse(back("error=no_refresh_token"))
 
     owned = await yt.my_channels(tokens.access_token)
     if not owned:
-        return RedirectResponse("/app#/channels?error=no_channel")
+        return RedirectResponse(back("error=no_channel"))
 
     now = datetime.now(UTC).replace(tzinfo=None)
-    붙임, 막힘 = 0, []
+    붙임, 막힘, 붙은이름 = 0, [], []
     for ch in owned:
         row = (
             await db.execute(
@@ -198,11 +216,141 @@ async def connect_callback(
         row.youtube_refresh_token = tokens.refresh_token
         # 동의는 연동 화면에서 따로 받는다. 여기서는 연동만.
         붙임 += 1
+        붙은이름.append(ch["title"])
+
+    if invite_id and 붙임:
+        # 링크는 한 번만 쓴다. 누가 뭘 붙였는지 관리자 목록에 남긴다.
+        inv = await db.get(ChannelInvite, invite_id)
+        if inv is not None:
+            inv.used_at = now
+            inv.result = ", ".join(붙은이름)[:500]
 
     await db.commit()
     if 막힘 and not 붙임:
-        return RedirectResponse("/app#/channels?error=already_connected")
-    return RedirectResponse(f"/app#/channels?connected={붙임}")
+        return RedirectResponse(back("error=already_connected"))
+    return RedirectResponse(back(f"connected={붙임}"))
+
+
+# ── 초대 링크: 관리자가 만들고, 유튜버가 로그인 없이 권한만 준다 ──────────
+#
+# MCN 관리자는 소속 유튜버의 구글 계정을 모른다. 채널 권한은 유튜버가 구글 화면을
+# 직접 통과해야 나온다. 유튜버가 옆에 없을 때 쓰는 길이 이것이다.
+# 자세한 이유는 models.ChannelInvite 주석.
+
+
+class InviteIn(BaseModel):
+    note: str | None = Field(None, max_length=100, description="누구에게 보내는 링크인지 메모")
+
+
+class InviteOut(BaseModel):
+    id: int
+    url: str
+    note: str | None
+    created_at: datetime
+    expires_at: datetime
+    used_at: datetime | None
+    result: str | None = Field(None, description="링크로 붙은 채널 이름")
+
+
+def _invite_url(token: str) -> str:
+    return get_settings().oauth_redirect_base.rstrip("/") + f"/connect/{token}"
+
+
+def _invite_out(i: ChannelInvite) -> InviteOut:
+    return InviteOut(
+        id=i.id, url=_invite_url(i.token), note=i.note, created_at=i.created_at,
+        expires_at=i.expires_at, used_at=i.used_at, result=i.result,
+    )
+
+
+@router.post("/invites", response_model=InviteOut, status_code=201, summary="채널 연결 초대 링크 만들기")
+async def create_invite(
+    payload: InviteIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    ws = await my_workspace_ids(db, user)
+    if not ws:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "워크스페이스가 없습니다")
+    inv = ChannelInvite.new(ws[0], user.id, (payload.note or "").strip() or None)
+    db.add(inv)
+    await db.commit()
+    await db.refresh(inv)
+    return _invite_out(inv)
+
+
+@router.get("/invites", response_model=list[InviteOut], summary="내가 만든 초대 링크")
+async def list_invites(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    ws = await my_workspace_ids(db, user)
+    if not ws:
+        return []
+    rows = (
+        await db.execute(
+            select(ChannelInvite)
+            .where(ChannelInvite.workspace_id.in_(ws))
+            .order_by(ChannelInvite.id.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+    return [_invite_out(i) for i in rows]
+
+
+class InviteInfo(BaseModel):
+    """유튜버가 링크를 열었을 때 보는 것. 로그인 없이 준다 — 그래서 최소만."""
+
+    valid: bool
+    reason: str | None = None
+    inviter_name: str | None = None
+    workspace_name: str | None = None
+    expires_at: datetime | None = None
+
+
+async def _load_invite(db: AsyncSession, token: str) -> ChannelInvite | None:
+    return (
+        await db.execute(select(ChannelInvite).where(ChannelInvite.token == token))
+    ).scalar_one_or_none()
+
+
+@router.get("/invites/{token}/info", response_model=InviteInfo, summary="초대 링크 확인 (공개)")
+async def invite_info(token: str, db: AsyncSession = Depends(get_db)):
+    inv = await _load_invite(db, token)
+    if inv is None:
+        return InviteInfo(valid=False, reason="없는 링크입니다")
+    if inv.used_at is not None:
+        return InviteInfo(valid=False, reason="이미 사용한 링크입니다")
+    if not inv.usable():
+        return InviteInfo(valid=False, reason=f"기한({INVITE_DAYS}일)이 지난 링크입니다")
+    inviter = await db.get(User, inv.created_by_user_id)
+    ws = await db.get(Workspace, inv.workspace_id)
+    return InviteInfo(
+        valid=True,
+        inviter_name=(inviter.name or inviter.email) if inviter else None,
+        workspace_name=ws.name if ws else None,
+        expires_at=inv.expires_at,
+    )
+
+
+@router.get("/connect/invite/{token}", include_in_schema=False)
+async def connect_via_invite(token: str, db: AsyncSession = Depends(get_db)):
+    """유튜버가 [권한 주기] 를 누르면 여기로 온다. 로그인 없음.
+
+    state 에 초대를 만든 관리자와 워크스페이스를 실어서, 콜백이 채널을 그 워크스페이스에
+    붙이게 한다. 콜백 코드는 관리자가 직접 연결할 때와 같다 — 길만 다르다.
+    """
+    inv = await _load_invite(db, token)
+    if inv is None or not inv.usable():
+        return RedirectResponse("/connect/done?error=invite_invalid")
+    cfg = get_settings()
+    if not cfg.oauth_ready:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "구글 OAuth 설정이 없습니다")
+    state = goog.states.issue(
+        kind="connect", user_id=inv.created_by_user_id, workspace_id=inv.workspace_id,
+        invite_id=inv.id,
+    )
+    return RedirectResponse(
+        goog.authorize_url(
+            cfg.google_client_id, _connect_uri(),
+            goog.LOGIN_SCOPES + goog.YOUTUBE_SCOPES, state, offline=True,
+        )
+    )
 
 
 class ConsentOut(BaseModel):
@@ -391,7 +539,10 @@ async def list_channels(
     if not ws:
         return []
     result = await db.execute(
-        select(Channel).where(Channel.workspace_id.in_(ws)).order_by(Channel.id)
+        select(Channel, User.email)
+        .outerjoin(User, User.id == Channel.connected_by_user_id)
+        .where(Channel.workspace_id.in_(ws))
+        .order_by(Channel.id)
     )
     # 토큰 자체는 절대 내보내지 않는다. 있는지 여부만 알려준다 —
     # 화면이 '조치가 유튜브에 반영되는 채널'인지 구분할 수 있어야 해서다.
@@ -400,8 +551,10 @@ async def list_channels(
             id=c.id,
             channel_title=c.channel_title,
             connected=bool(c.youtube_refresh_token),
+            connected_at=c.connected_at if c.youtube_refresh_token else None,
+            connected_by=email if c.youtube_refresh_token else None,
         )
-        for c in result.scalars().all()
+        for c, email in result.all()
     ]
 
 

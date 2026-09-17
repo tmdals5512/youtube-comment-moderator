@@ -31,6 +31,7 @@ STATEMENTS = [
     # ── 로그인·권한 (F_R_101) ──
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS picture TEXT",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT",
     "ALTER TABLE workspaces ALTER COLUMN type SET DEFAULT 'personal'",
     "ALTER TABLE workspace_members ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()",
     # 같은 사람이 같은 워크스페이스에 두 번 들어가면 권한 판정이 갈린다.
@@ -54,6 +55,19 @@ STATEMENTS = [
     # 채널 소유자 리프레시 토큰. 연동 해제 시 반드시 NULL 로 지운다.
     "ALTER TABLE channels ADD COLUMN IF NOT EXISTS youtube_refresh_token TEXT",
     "CREATE INDEX IF NOT EXISTS ix_channels_workspace ON channels (workspace_id)",
+    # 채널 연결 초대 링크. 왜 DB 인지는 models.ChannelInvite 주석 참고.
+    """CREATE TABLE IF NOT EXISTS channel_invites (
+        id                 SERIAL PRIMARY KEY,
+        token              VARCHAR(64) UNIQUE NOT NULL,
+        workspace_id       INTEGER NOT NULL REFERENCES workspaces(id),
+        created_by_user_id INTEGER NOT NULL REFERENCES users(id),
+        note               VARCHAR(100),
+        created_at         TIMESTAMP DEFAULT now(),
+        expires_at         TIMESTAMP NOT NULL,
+        used_at            TIMESTAMP,
+        result             VARCHAR(500)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_channel_invites_ws ON channel_invites (workspace_id)",
 
 
     # ── 수집 대상 영상 ──

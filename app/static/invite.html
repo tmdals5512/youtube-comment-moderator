@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>채널 연결 요청 · Outlier</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:#14121f; font-family:system-ui,-apple-system,"Segoe UI","Noto Sans KR",sans-serif; padding:16px; box-sizing:border-box; }
+  .card { width:100%; max-width:440px; background:#fff; border-radius:16px; padding:40px 36px 32px; box-shadow:0 24px 60px rgba(0,0,0,.35); }
+  .logo { display:flex; align-items:center; gap:10px; margin-bottom:26px; font-weight:700; font-size:19px; color:#17171f; }
+  h1 { margin:0 0 10px; font-size:22px; line-height:1.35; color:#17171f; }
+  p { margin:0 0 14px; font-size:14px; line-height:1.65; color:#6b6b78; }
+  .who { padding:12px 14px; background:#f5f4fb; border-radius:10px; font-size:13.5px; color:#3a3750; margin:0 0 18px; }
+  .who b { color:#17171f; }
+  button, .btn { width:100%; height:50px; display:flex; align-items:center; justify-content:center; gap:10px; border:none; border-radius:10px;
+                 background:#5b47e0; color:#fff; font-size:15px; font-weight:600; cursor:pointer; text-decoration:none; box-sizing:border-box; }
+  .muted { font-size:12.5px; color:#8a8a96; margin-top:14px; }
+  .err { padding:12px 14px; background:#fff5f5; border:1px solid #f0b4b4; border-radius:10px; color:#b42318; font-size:13.5px; }
+  .ok { padding:12px 14px; background:#f0fbf4; border:1px solid #b7e4c7; border-radius:10px; color:#1b6b3a; font-size:13.5px; }
+  ul { margin:0 0 18px; padding-left:18px; font-size:13.5px; color:#6b6b78; line-height:1.7; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <svg width="26" height="26" viewBox="0 0 26 26"><circle cx="6" cy="8" r="2.4" fill="#c9c6da"/><circle cx="12" cy="6" r="2.4" fill="#c9c6da"/><circle cx="7" cy="15" r="2.4" fill="#c9c6da"/><circle cx="14" cy="14" r="2.4" fill="#c9c6da"/><circle cx="21" cy="21" r="3.4" fill="#5b47e0"/></svg>
+    Outlier
+  </div>
+  <div id="root"><p>확인 중…</p></div>
+</div>
+<script>
+(function () {
+  var root = document.getElementById("root");
+  var esc = function (s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]; }); };
+  var path = location.pathname.replace(/\/+$/, "");
+  var q = new URLSearchParams(location.search);
+
+  var ERR = {
+    cancelled: "권한 주기를 취소하셨습니다. 다시 하려면 받은 링크를 다시 열어주세요.",
+    access_denied: "구글에서 거부됐습니다. 이 앱은 아직 검증 전이라 등록된 테스트 계정만 됩니다. 관리자에게 알려주세요.",
+    no_refresh_token: "이미 전에 권한을 준 계정입니다. 구글 계정 설정 → 보안 → 서드파티 앱에서 Outlier 접근을 지운 뒤 다시 해주세요.",
+    no_channel: "고른 구글 계정에 유튜브 채널이 없습니다. 채널이 있는 계정으로 다시 해주세요.",
+    already_connected: "이 채널은 이미 다른 곳에 연결되어 있습니다. 관리자에게 알려주세요.",
+    invite_invalid: "이 링크는 쓸 수 없습니다 (이미 사용됐거나 기한이 지났습니다). 관리자에게 새 링크를 요청하세요.",
+  };
+
+  if (path === "/connect/done") {
+    var n = q.get("connected"), e = q.get("error");
+    if (n && !e) {
+      root.innerHTML =
+        '<h1>연결됐습니다</h1>' +
+        '<div class="ok">채널 ' + esc(n) + '개가 관리자 워크스페이스에 연결되었습니다.</div>' +
+        '<p style="margin-top:16px">이제 이 창을 닫아도 됩니다. 관리자가 댓글 관리를 시작하려면 <b>AI 판별 동의</b>를 켜야 하고, 그건 관리자 화면에서 합니다.</p>' +
+        '<p class="muted">권한을 거두고 싶으면 구글 계정 설정 → 보안 → 서드파티 앱에서 언제든 지울 수 있습니다.</p>';
+    } else {
+      root.innerHTML = '<h1>연결되지 않았습니다</h1><div class="err">' + esc(ERR[e] || e || "알 수 없는 오류") + '</div>';
+    }
+    return;
+  }
+
+  var token = path.split("/").pop();
+  fetch("/api/channels/invites/" + encodeURIComponent(token) + "/info")
+    .then(function (r) { return r.json(); })
+    .then(function (info) {
+      if (!info.valid) {
+        root.innerHTML = '<h1>쓸 수 없는 링크</h1><div class="err">' + esc(info.reason) + '</div>';
+        return;
+      }
+      root.innerHTML =
+        '<h1>유튜브 채널 연결 요청</h1>' +
+        '<div class="who"><b>' + esc(info.inviter_name) + '</b> 님(' + esc(info.workspace_name) + ')이 ' +
+        '회원님 채널의 댓글 관리를 맡기 위해 권한을 요청했습니다.</div>' +
+        '<p>아래 버튼을 누르면 구글 화면이 열립니다. <b>채널이 있는 구글 계정</b>을 고르고 YouTube 권한을 허용해 주세요. Outlier 에 가입하거나 로그인할 필요는 없습니다.</p>' +
+        '<ul>' +
+        '<li>관리자는 댓글을 <b>가리기(숨김)</b>, 유지, 작성자 차단할 수 있게 됩니다.</li>' +
+        '<li>영상 업로드·삭제, 수익, 채널 설정에는 손댈 수 없습니다.</li>' +
+        '<li>권한은 구글 계정 설정에서 언제든 거둘 수 있습니다.</li>' +
+        '</ul>' +
+        '<a class="btn" href="/api/channels/connect/invite/' + encodeURIComponent(token) + '">' +
+        '<svg width="17" height="17" viewBox="0 0 24 24" fill="#fff"><path d="M21.6 7.2s-.2-1.5-.8-2.2c-.8-.8-1.7-.8-2.1-.9C15.9 4 12 4 12 4s-3.9 0-6.7.1c-.4 0-1.3.1-2.1.9-.6.7-.8 2.2-.8 2.2S2.2 9 2.2 10.8v1.4C2.2 14 2.4 15.8 2.4 15.8s.2 1.5.8 2.2c.8.8 1.9.8 2.3.9 1.7.2 7.5.2 7.5.2s3.9 0 6.7-.1c.4 0 1.3-.1 2.1-.9.6-.7.8-2.2.8-2.2s.2-1.8.2-3.6v-1.4c0-1.8-.2-3.6-.2-3.6z"/><path d="M9.8 15V9l5.4 3z" fill="#5b47e0"/></svg>' +
+        '구글로 채널 권한 주기</a>' +
+        '<div class="muted">이 링크는 한 번만 쓸 수 있고 ' + esc(new Date(info.expires_at + "Z").toLocaleDateString("ko-KR")) + '까지 유효합니다.</div>';
+    })
+    .catch(function () { root.innerHTML = '<div class="err">서버에 연결하지 못했습니다.</div>'; });
+})();
+</script>
+</body>
+</html>

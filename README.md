@@ -15,7 +15,7 @@
 조치는 사람이 하도록** 나눈다.
 
 ```
-구글 로그인 → 채널 연결 (YouTube OAuth) → AI 판별 동의
+로그인 (이메일+비밀번호 또는 Google) → 채널 연결 (채널 주인의 YouTube OAuth) → AI 판별 동의
    ↓
 서버가 매시간                            app/services/watcher.py
    최신 영상 댓글 수집 (새 것만)
@@ -126,7 +126,7 @@ python run.py               # 또는 python -m uvicorn app.main:app --port 8000
 
 | 주소 | 화면 |
 |---|---|
-| http://localhost:8000/ | 로그인 (Google) |
+| http://localhost:8000/ | 로그인 · 가입 (이메일+비밀번호, 또는 Google) |
 | http://localhost:8000/app | 관리자 화면 |
 | http://localhost:8000/docs | API 문서 |
 | http://localhost:8000/api/health/watch | 자동 감시 상태 (대시보드에도 나옴) |
@@ -164,6 +164,8 @@ URI 와 같아야 한다. 개발 중 구글 없이 들어가려면 `.env` 에 `D
 | `GET·PUT /api/channels/{id}/auto-hide` | 자동 숨김 카테고리 |
 | `GET·PUT /api/channels/{id}/context` | 채널 기준 (참고 정보) |
 | `POST /api/channels/{id}/disconnect` | 연동 해제 — 데이터 전부 삭제 |
+| `POST·GET /api/channels/invites` | 채널 연결 초대 링크 (관리자가 만들어 유튜버에게 보냄) |
+| `GET /connect/{token}` | 유튜버가 여는 초대 페이지 — 로그인 없이 채널 주인 계정으로 권한만 |
 | `GET /api/channels/{id}/stats` | 처리 현황 |
 | `GET /api/channels/{id}/queue` | 검토 큐 — 위험도순 |
 | `GET /api/channels/{id}/hidden` | 숨김 목록 |
@@ -184,10 +186,11 @@ app/
   core/       config, deps (인증·격리의 유일한 관문)
   services/
     google_oauth.py    구글 로그인·채널 연동 (httpx 직접 구현)
+    password.py        이메일 가입 비밀번호 해시 (scrypt, 표준 라이브러리)
     youtube_actions.py 숨김·복구·채널차단을 유튜브에 반영
     collector.py       댓글 수집. 기본 호출은 답글의 58%만 오므로 잘린 스레드 보충
     pattern.py         등록어 1개 → 우회표현 정규식 (초성·겹자음·끼어들기·모음늘이기)
-    moderation.py      등록어 검사 (allow → block → review, 채널별 격리)
+    moderation.py      등록어 검사 (block → review, 채널별 격리. 예외 동작은 뺐다)
     llm.py             LLM 판별. 프롬프트와 이력이 여기 있다
     pipeline.py        조각을 잇는다. 행선지 정책은 route() 하나에만
     store.py           판정 저장. 덮어쓰지 않고 쌓는다 (prompt_version 기록)

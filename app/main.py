@@ -93,6 +93,22 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # 관리자 화면은 빌드 단계 없는 정적 파일이다. 같은 서버에서 내보내므로
 # 프론트를 따로 띄울 필요도, CORS 를 탈 일도 없다.
+@app.middleware("http")
+async def _static_no_cache(request, call_next):
+    """js·css 도 매번 서버에 물어보게 한다.
+
+    StaticFiles 는 ETag 만 붙이고 Cache-Control 을 안 준다. 그러면 브라우저가
+    Last-Modified 를 보고 알아서 며칠씩 들고 있어서, 화면을 고쳐도 사용자는
+    옛 app.js 를 본다 (2026-09-17 실제로 그랬다 — "뭐가 다른 거야, 똑같은데").
+    no-cache 는 '쓰지 마라' 가 아니라 '쓰기 전에 물어봐라' 다. ETag 가 같으면
+    304 로 끝나서 비용은 거의 없다.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -116,7 +132,7 @@ def _page(path: Path) -> FileResponse:
     no-cache 는 '쓰지 마라'가 아니라 '쓰기 전에 물어봐라'다. 안 바뀌었으면
     304 로 끝나서 비용도 거의 없다.
 
-    /static 아래 js·css 는 StaticFiles 가 ETag 를 붙여줘서 그대로 둔다.
+    /static 아래 js·css 는 _static_no_cache 미들웨어가 같은 헤더를 붙인다.
     """
     return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
@@ -132,6 +148,17 @@ async def onboarding(step: int) -> FileResponse:
     if step not in ONBOARDING:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"온보딩 {step}단계 없음")
     return _page(STATIC_DIR / "screens" / ONBOARDING[step])
+
+
+@app.get("/connect/done", include_in_schema=False)
+@app.get("/connect/{token}", include_in_schema=False)
+async def invite_page() -> FileResponse:
+    """유튜버가 받는 채널 연결 초대 페이지. 로그인 없음.
+
+    /connect/<토큰> 은 안내 + [권한 주기], /connect/done 은 결과. 한 파일이
+    주소를 보고 둘 중 하나를 그린다.
+    """
+    return _page(STATIC_DIR / "invite.html")
 
 
 @app.get("/app", include_in_schema=False)

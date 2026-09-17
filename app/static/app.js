@@ -57,6 +57,8 @@ const 로그인오류 = {
   state:
     "로그인 절차가 중간에 끊겼습니다 (서버가 재시작됐거나 너무 오래 걸렸습니다). " +
     "다시 시도해주세요.",
+  password_account:
+    "이 이메일은 비밀번호로 가입한 계정입니다. 첫 화면에서 이메일과 비밀번호로 로그인하세요.",
 };
 
 function showLogin() {
@@ -71,8 +73,14 @@ function showLogin() {
       <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:8px">
         로그인이 필요합니다</div>
       ${오류}
-      <div style="margin-bottom:20px">채널 데이터는 로그인한 사람에게만 보입니다.</div>
-      <button id="login" style="flex:0 0 auto;padding:10px 30px">로그인</button>
+      <div style="margin-bottom:8px">채널 데이터는 로그인한 사람에게만 보입니다.</div>
+      <div style="margin-bottom:20px;font-size:12.5px;color:var(--muted)">
+        이메일로 가입한 계정이나 Google 계정으로 들어옵니다.<br>
+        유튜브 채널 연결은 로그인 뒤 채널 주인 계정으로 따로 합니다.</div>
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+        <button id="login-email" style="flex:0 0 auto;padding:10px 24px">이메일로 로그인</button>
+        <button id="login" class="slim" style="flex:0 0 auto;padding:10px 24px">Google로 계속하기</button>
+      </div>
     </div>`;
   $("#login").onclick = () => {
     // login_error 는 다시 들고 가지 않는다. 성공하고 돌아왔는데 옛 오류가
@@ -81,6 +89,8 @@ function showLogin() {
       "/api/auth/start?next=" +
       encodeURIComponent(location.pathname + location.hash);
   };
+  // 이메일 로그인 폼은 첫 화면에 있다.
+  $("#login-email").onclick = () => (location.href = "/");
 }
 
 /** 화면에 넣기 전에 반드시 통과시킨다. 댓글 본문은 남이 쓴 글이라 그대로
@@ -559,7 +569,7 @@ async function viewList(kind) {
 
 // ── 관리 기준 ─────────────────────────────────────────
 
-const ACTION_KO = { block: "차단", review: "검토", allow: "예외" };
+const ACTION_KO = { block: "차단", review: "검토" };
 
 // 토글 한 줄. 켜짐/꺼짐이 색만이 아니라 위치로도 드러나야 한다 —
 // 되돌릴 수 없는 조치를 켜는 스위치라 상태를 잘못 읽으면 곤란하다.
@@ -610,7 +620,6 @@ async function viewRules() {
           <select class="mini" id="action">
             <option value="review">검토 — 큐로 보냄</option>
             <option value="block">차단 — 바로 숨김</option>
-            <option value="allow">예외 — 통과</option>
           </select>
           <button class="slim" id="add">추가</button>
         </div>
@@ -619,7 +628,7 @@ async function viewRules() {
             ? list
                 .map(
                   (r) => `<span class="chip">
-                    <span class="tag ${r.action === "block" ? "hide" : r.action === "allow" ? "keep" : "rule"}">${
+                    <span class="tag ${r.action === "block" ? "hide" : "rule"}">${
                       ACTION_KO[r.action]
                     }</span>${esc(r.rule_value)}
                     <span class="x" data-id="${r.id}">✕</span></span>`
@@ -823,6 +832,13 @@ async function viewHistory() {
 async function refreshBadge() {
   const q = $("#badge"), h = $("#badge-hidden");
   if (!q && !h) return;
+  // 채널이 하나도 없으면 물을 곳이 없다. 0번 채널을 묻어 404 를 만들지 않는다
+  // (새 계정으로 들어온 첫 화면에서 실제로 그랬다).
+  if (!channelId()) {
+    if (q) q.textContent = "";
+    if (h) h.textContent = "";
+    return;
+  }
   try {
     const s = await api(`/channels/${channelId()}/stats?period=all`);
     if (q) q.textContent = s.unreviewed ? num(s.unreviewed) : "";
@@ -913,15 +929,66 @@ async function viewChannels() {
       <div style="display:flex;justify-content:space-between;align-items:center;
                   margin-bottom:14px">
         <h2 style="margin:0">채널 ${list.length}개</h2>
-        <button class="slim" id="connect" style="flex:0 0 auto">+ 채널 연결</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="slim" id="invite" style="flex:0 0 auto">유튜버에게 연결 링크 보내기</button>
+          <button class="slim" id="connect" style="flex:0 0 auto">+ 채널 연결</button>
+        </div>
       </div>
       <div id="chlist"></div>
-      <div class="note" style="margin-top:16px">연결할 때 구글이 'YouTube 관리' 권한을
-        물어봅니다. 그 권한이 있어야 <b>숨김이 실제 유튜브에 반영</b>됩니다.
+      <div id="invites" style="margin-top:18px"></div>
+      <div class="note" style="margin-top:16px">채널 연결은 로그인이 아닙니다.
+        <b>채널 주인의 구글 계정</b>으로 'YouTube 관리' 권한을 받는 단계이고, 채널마다
+        따로 저장됩니다. 채널이 로그인한 계정과 다른 계정에 있으면 구글 화면에서 그
+        계정을 고르세요. 그 권한이 있어야 <b>숨김이 실제 유튜브에 반영</b>됩니다.
         권한 없이도 댓글 수집과 판별은 되지만, 조치는 우리 기록에만 남습니다.</div>
     </div>`;
 
   $("#connect").onclick = () => (location.href = "/api/channels/connect/start");
+
+  // ── 초대 링크: 유튜버가 옆에 없을 때. 관리자는 유튜버 구글 계정을 모른다 ──
+  async function 초대목록() {
+    const box = $("#invites");
+    if (!box) return;
+    let items = [];
+    try { items = await api("/channels/invites"); } catch { return; }
+    if (!items.length) { box.innerHTML = ""; return; }
+    box.innerHTML = `
+      <h2 style="font-size:14px;margin:0 0 8px">보낸 연결 링크</h2>
+      ${items.map((i) => `
+        <div style="display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line-soft);font-size:12.5px">
+          <div style="flex:1;min-width:0">
+            <div><b>${esc(i.note || "메모 없음")}</b> · ${
+              i.used_at
+                ? `<span style="color:var(--ok)">연결됨 — ${esc(i.result || "")}</span>`
+                : new Date(i.expires_at + "Z") < new Date()
+                  ? `<span style="color:var(--muted)">기한 지남</span>`
+                  : `<span style="color:var(--muted)">대기 중 · ${new Date(i.expires_at + "Z").toLocaleDateString("ko-KR")}까지</span>`
+            }</div>
+            <div style="color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(i.url)}</div>
+          </div>
+          ${i.used_at ? "" : `<button class="slim" data-copy="${esc(i.url)}" style="flex:0 0 auto">복사</button>`}
+        </div>`).join("")}
+      <div class="note" style="margin-top:12px">링크를 받은 유튜버는 가입·로그인 없이 링크를 열고
+        <b>자기 구글 계정</b>으로 권한만 누르면 됩니다. 채널은 이 워크스페이스에 붙습니다.
+        링크는 한 번 쓰면 끝나고 7일 뒤 만료됩니다.</div>`;
+    box.querySelectorAll("[data-copy]").forEach((b) => {
+      b.onclick = async () => {
+        try { await navigator.clipboard.writeText(b.dataset.copy); toast("링크를 복사했습니다"); }
+        catch { prompt("복사해서 보내세요", b.dataset.copy); }
+      };
+    });
+  }
+  $("#invite").onclick = async () => {
+    const note = prompt("누구에게 보내는 링크인가요? (예: 진용진 채널)") ;
+    if (note === null) return;
+    try {
+      const inv = await api("/channels/invites", { method: "POST", body: JSON.stringify({ note }) });
+      try { await navigator.clipboard.writeText(inv.url); toast("링크를 만들어 복사했습니다. 유튜버에게 보내세요"); }
+      catch { toast("링크를 만들었습니다. 아래에서 복사하세요"); }
+      초대목록();
+    } catch (e) { toast(`링크를 만들지 못했습니다: ${e.message}`); }
+  };
+  초대목록();
 
   // 채널별 동의 상태를 같이 물어본다 (목록 API 는 가벼워야 해서 따로 둔다)
   const 상태 = await Promise.all(
@@ -949,7 +1016,13 @@ async function viewChannels() {
             } ·
             ${
               c.connected
-                ? `<span style="color:var(--ok)">유튜브 권한 있음</span>`
+                ? `<span style="color:var(--ok)">유튜브 권한 있음</span>${
+                    c.connected_by
+                      ? ` · ${esc(c.connected_by)} 님이 연결${
+                          c.connected_at ? ` (${new Date(c.connected_at + "Z").toLocaleDateString("ko-KR")})` : ""
+                        }`
+                      : ""
+                  }`
                 : `<span style="color:var(--critical)">유튜브 권한 없음 — 숨김이 반영되지 않습니다</span>`
             }
           </div>
@@ -1055,8 +1128,11 @@ function showNoChannel() {
       <div class="empty" style="padding:44px 20px;text-align:center">
         <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:8px">
           유튜브 채널을 연결해주세요</div>
-        <div style="margin-bottom:22px">연결하면 댓글을 모아 위험한 것부터
+        <div style="margin-bottom:10px">연결하면 댓글을 모아 위험한 것부터
           보여드립니다.</div>
+        <div style="margin-bottom:22px;font-size:12.5px;color:var(--muted)">
+          로그인은 끝났습니다. 다음은 <b>채널 주인의 구글 계정</b>으로 유튜브 권한을
+          받는 단계입니다. 채널이 다른 계정에 있으면 그 계정을 고르세요.</div>
         <button id="go-connect" style="flex:0 0 auto;padding:10px 28px">
           채널 연결하기</button>
       </div>

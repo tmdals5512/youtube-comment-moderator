@@ -27,10 +27,18 @@ SESSION_DAYS = 14
 
 
 class User(Base):
-    """Google 로그인으로 만들어지는 계정.
+    """우리 사이트 계정. 이메일+비밀번호로 가입하거나 Google 로 들어온다.
 
-    비밀번호를 받지 않는다. 유튜브 채널을 붙이려면 어차피 구글 인증이
-    필요해서, 로그인 수단을 따로 두면 계정이 둘로 갈린다.
+    처음엔 Google 만 받았다. 유튜브 채널을 붙이려면 어차피 구글 인증이 필요해서다.
+    그런데 "우리 사이트 로그인" 과 "채널 주인의 유튜브 권한" 이 둘 다 구글 화면이라
+    사용자에게 같은 일을 두 번 하는 것으로 보였다 (2026-09-17 팀 결정). 그래서
+    사이트 로그인은 이메일+비밀번호를 기본으로 두고 Google 은 선택지로 남긴다.
+    채널 연결은 여전히 채널 주인의 구글 계정으로만 된다 — 그건 유튜브 쪽 일이다.
+
+    이메일 가입과 Google 은 서로 이어붙이지 않는다. 가입 때 이메일 소유를 확인하지
+    않아서(메일 인증 없음), 어느 방향으로 합치든 남의 이메일로 먼저 가입해 둔 사람이
+    계정을 가져갈 길이 생긴다. Google 계정 이메일로 비밀번호 가입은 409, 비밀번호
+    계정 이메일로 Google 로그인은 login_error=password_account. 메일 인증을 붙이면 풀 수 있다.
     """
 
     __tablename__ = "users"
@@ -38,6 +46,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True)
     name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # 이메일 가입 계정만 값이 있다. 원문이 아니라 scrypt 해시 (services/password.py).
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # 구글이 주는 고유 식별자(sub). 이메일은 바뀔 수 있어서 이걸 기준으로 찾는다.
     google_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
@@ -181,6 +192,52 @@ class ChannelRule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     channel: Mapped["Channel"] = relationship(back_populates="rules")
+
+
+INVITE_DAYS = 7
+
+
+class ChannelInvite(Base):
+    """채널 연결 초대 링크 — 관리자가 만들어 유튜버에게 보내는 것.
+
+    MCN 관리자는 소속 유튜버의 구글 계정을 모른다 (알아서도 안 된다). 채널 권한은
+    유튜버 본인이 구글 화면을 통과해야 나오는데, 지금까지는 관리자가 로그인한
+    브라우저 앞에 유튜버가 앉아 있어야 했다. 이 링크가 있으면 유튜버는 우리 사이트에
+    가입도 로그인도 없이 링크 하나 열어 권한만 눌러주고, 채널은 관리자 워크스페이스에 붙는다.
+
+    OAuth state(메모리, 10분)로는 안 되는 이유: 카톡으로 보낸 링크는 며칠 뒤에 열리고,
+    그 사이 서버가 재시작될 수 있다. 그래서 DB 에 둔다. 한 번 쓰면 끝(used_at).
+    """
+
+    __tablename__ = "channel_invites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    # 누구에게 보내는 링크인지 관리자가 적어두는 메모. 목록에서 구분하는 용도.
+    note: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 링크로 붙은 채널 이름들. 기록용.
+    result: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    @classmethod
+    def new(cls, workspace_id: int, user_id: int, note: str | None) -> "ChannelInvite":
+        now = datetime.now(UTC).replace(tzinfo=None)
+        return cls(
+            token=secrets.token_urlsafe(32),
+            workspace_id=workspace_id,
+            created_by_user_id=user_id,
+            note=note,
+            created_at=now,
+            expires_at=now + timedelta(days=INVITE_DAYS),
+        )
+
+    def usable(self, now: datetime | None = None) -> bool:
+        now = now or datetime.now(UTC).replace(tzinfo=None)
+        return self.used_at is None and self.expires_at > now
 
 
 class Video(Base):

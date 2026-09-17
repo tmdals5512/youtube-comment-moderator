@@ -84,6 +84,7 @@ def authorize_url(
     state: str,
     *,
     offline: bool = False,
+    login_hint: str | None = None,
 ) -> str:
     params = {
         "client_id": client_id,
@@ -93,6 +94,12 @@ def authorize_url(
         "state": state,
         "include_granted_scopes": "true",
     }
+    if login_hint:
+        # 채널 연결 때 로그인한 계정을 구글에 미리 알려준다. 같은 계정이면
+        # 계정 선택 화면에 그 계정이 골라져 있어 한 번 클릭으로 끝난다.
+        # 로그인 → 채널 연결이 "구글 두 번" 으로 보이는 걸 줄이는 장치다.
+        # 다른 계정(채널 주인)을 골라야 하면 그냥 바꿔 고르면 된다 — 강제가 아니다.
+        params["login_hint"] = login_hint
     if offline:
         # 리프레시 토큰은 offline + consent 를 같이 줘야 확실히 온다.
         # prompt 를 빼면 두 번째 연동부터 refresh_token 이 안 와서,
