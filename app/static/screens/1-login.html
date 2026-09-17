@@ -51,7 +51,28 @@
     </div>
 
     <h1 style="margin:0 0 10px; font-size:25px; font-weight:700; line-height:1.35; color:#17171f;">여러 채널의 위험한 댓글을<br>놓치지 마세요</h1>
-    <p style="margin:0 0 28px; font-size:14px; line-height:1.6; color:#6b6b78;">채널마다 학습하는 AI가 지금 확인해야 할 댓글부터<br>우선순위로 정리해드려요.</p>
+    <p style="margin:0 0 24px; font-size:14px; line-height:1.6; color:#6b6b78;">채널마다 학습하는 AI가 지금 확인해야 할 댓글부터<br>우선순위로 정리해드려요.</p>
+
+    <!-- 이메일 로그인 / 가입. 서버: POST /api/auth/login, /api/auth/signup -->
+    <form id="emailform" novalidate style="margin:0 0 18px;">
+      <input id="f-email" type="email" placeholder="이메일" autocomplete="username"
+             style="width:100%; box-sizing:border-box; height:46px; padding:0 14px; margin-bottom:8px; border:1px solid #dcdce4; border-radius:10px; font-size:14px; color:#17171f; background:#fff;">
+      <input id="f-password" type="password" placeholder="비밀번호 (8자 이상)" autocomplete="current-password"
+             style="width:100%; box-sizing:border-box; height:46px; padding:0 14px; margin-bottom:8px; border:1px solid #dcdce4; border-radius:10px; font-size:14px; color:#17171f; background:#fff;">
+      <input id="f-name" type="text" placeholder="이름 (화면에 표시됩니다)" autocomplete="name" hidden
+             style="width:100%; box-sizing:border-box; height:46px; padding:0 14px; margin-bottom:8px; border:1px solid #dcdce4; border-radius:10px; font-size:14px; color:#17171f; background:#fff;">
+      <div id="f-error" hidden style="margin:2px 0 10px; padding:9px 12px; border:1px solid #f0b4b4; background:#fff5f5; border-radius:8px; font-size:12.5px; line-height:1.5; color:#b42318;"></div>
+      <button id="f-submit" type="submit"
+              style="width:100%; height:48px; background:#5b47e0; border:none; border-radius:10px; font-size:15px; font-weight:600; color:#ffffff; cursor:pointer;">로그인</button>
+      <div style="margin-top:10px; font-size:12.5px; color:#6b6b78; text-align:center;">
+        <span id="f-toggle-q">처음이세요?</span>
+        <a id="f-toggle" href="#" style="color:#5b47e0; font-weight:600; text-decoration:none;">가입하기</a>
+      </div>
+    </form>
+
+    <div style="display:flex; align-items:center; gap:10px; margin:0 0 14px; font-size:12px; color:#9a9aa6;">
+      <span style="flex:1; height:1px; background:#e6e6ee;"></span>또는<span style="flex:1; height:1px; background:#e6e6ee;"></span>
+    </div>
 
     <button style="width:100%; height:50px; display:flex; align-items:center; justify-content:center; gap:10px; background:#ffffff; border:1px solid #dcdce4; border-radius:10px; font-size:15px; font-weight:600; color:#17171f; cursor:pointer;">
       <svg width="18" height="18" viewBox="0 0 18 18">
@@ -60,10 +81,15 @@
         <path fill="#FBBC05" d="M3.98 10.74c-.18-.55-.29-1.13-.29-1.74s.11-1.19.29-1.74V4.92H.96C.35 6.14 0 7.53 0 9s.35 2.86.96 4.08l3.02-2.34z"/>
         <path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.59-2.59C13.46.89 11.43 0 9 0 5.48 0 2.44 2.02.96 4.92l3.02 2.34C4.69 5.15 6.67 3.58 9 3.58z"/>
       </svg>
-      Google로 시작하기
+      Google로 계속하기
     </button>
 
-    <p style="margin:22px 0 0; font-size:12px; line-height:1.6; color:#9a9aa6; text-align:center;">
+    <p style="margin:14px 0 0; font-size:12.5px; line-height:1.65; color:#6b6b78; text-align:center;">
+      여기서는 <b>우리 사이트 계정</b>만 만듭니다.<br>
+      유튜브 채널 연결은 로그인 뒤 다음 단계에서 <b>채널 주인의 구글 계정</b>으로 따로 합니다.
+    </p>
+
+    <p style="margin:18px 0 0; font-size:12px; line-height:1.6; color:#9a9aa6; text-align:center;">
       로그인 시 Outlier의 <a href="#">이용약관</a> 및 <a href="#">개인정보처리방침</a>에<br>동의하는 것으로 간주됩니다.
     </p>
   </div>
@@ -75,7 +101,41 @@
    버튼/링크는 텍스트만 맞으면 잡고, div·span 은 잎사귀 수준일 때만 잡는다
    (텍스트가 같은 큰 컨테이너를 실수로 잡지 않으려고). */
 (function () {
-  var NEXT = "/api/auth/start", DEMO = "/onboarding/2", CTA = "Google\ub85c \uc2dc\uc791\ud558\uae30", NAV = {"대시보드":"/app#/dashboard","채널 관리":"/onboarding/3","관리 기준":"/app#/rules","처리 이력":"/app#/history"};
+  // \u2500\u2500 \uc774\uba54\uc77c \ub85c\uadf8\uc778 / \uac00\uc785 \u2500\u2500
+  var signup = false;
+  var $ = function (id) { return document.getElementById(id); };
+  function showErr(msg) { var e = $("f-error"); e.textContent = msg; e.hidden = !msg; }
+  function setMode(s) {
+    signup = s;
+    $("f-name").hidden = !s;
+    $("f-submit").textContent = s ? "\uac00\uc785\ud558\uace0 \uc2dc\uc791\ud558\uae30" : "\ub85c\uadf8\uc778";
+    $("f-toggle-q").textContent = s ? "\uc774\ubbf8 \uacc4\uc815\uc774 \uc788\uc73c\uc138\uc694?" : "\ucc98\uc74c\uc774\uc138\uc694?";
+    $("f-toggle").textContent = s ? "\ub85c\uadf8\uc778" : "\uac00\uc785\ud558\uae30";
+    $("f-password").autocomplete = s ? "new-password" : "current-password";
+    showErr("");
+  }
+  $("f-toggle").addEventListener("click", function (e) { e.preventDefault(); setMode(!signup); });
+  $("emailform").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var email = $("f-email").value.trim(), pw = $("f-password").value;
+    if (!email || !pw) { showErr("\uc774\uba54\uc77c\uacfc \ube44\ubc00\ubc88\ud638\ub97c \uc785\ub825\ud558\uc138\uc694."); return; }
+    if (signup && pw.length < 8) { showErr("\ube44\ubc00\ubc88\ud638\ub294 8\uc790 \uc774\uc0c1\uc774\uc5b4\uc57c \ud569\ub2c8\ub2e4."); return; }
+    var body = { email: email, password: pw };
+    if (signup) body.name = $("f-name").value.trim() || null;
+    $("f-submit").disabled = true;
+    fetch(signup ? "/api/auth/signup" : "/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }).then(function (r) {
+      return r.json().then(function (j) { return { ok: r.ok, j: j }; });
+    }).then(function (x) {
+      if (x.ok) { location.href = (x.j && x.j.next) || "/app"; return; }
+      var d = x.j && x.j.detail;
+      showErr(typeof d === "string" ? d : "\uc694\uccad\uc744 \ucc98\ub9ac\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4. \uc785\ub825\uc744 \ud655\uc778\ud558\uc138\uc694.");
+      $("f-submit").disabled = false;
+    }).catch(function () { showErr("\uc11c\ubc84\uc5d0 \uc5f0\uacb0\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4."); $("f-submit").disabled = false; });
+  });
+
+  var NEXT = "/api/auth/start", DEMO = "/onboarding/2", CTA = "Google\ub85c \uacc4\uc18d\ud558\uae30", NAV = {"대시보드":"/app#/dashboard","채널 관리":"/onboarding/3","관리 기준":"/app#/rules","처리 이력":"/app#/history"};
   function go(url) { return function (e) { e.preventDefault(); e.stopPropagation(); location.href = url; }; }
   function bind(el, url) { el.style.cursor = "pointer"; el.addEventListener("click", go(url)); }
 
@@ -98,9 +158,9 @@
     b.onclick = function () { location.href = DEMO; };
     document.body.appendChild(b);
   }
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" || e.key === "ArrowRight") location.href = DEMO;
-  });
+  // 시안 넘기기용 단축키(Enter/→ 로 다음 시안)는 뺐다. 이 화면에 진짜 입력 폼이
+  // 생겨서, 비밀번호 치고 Enter 를 누르면 가입 대신 시안 화면(/onboarding/2)으로
+  // 튕겼다 (2026-09-17 실제로 그랬다 — "처음으로 돌아가기가 없음").
 })();
 </script>
 </body>

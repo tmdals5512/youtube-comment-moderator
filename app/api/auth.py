@@ -1,14 +1,18 @@
-"""Google 로그인 · 로그아웃 · 내 정보 (F_R_101).
+"""로그인 (이메일+비밀번호 / Google) · 로그아웃 · 내 정보 (F_R_101).
 
 처음 로그인하면 개인 워크스페이스를 하나 만들어준다. 워크스페이스가 없으면
 채널을 붙일 데가 없어서, 가입 직후에 아무것도 못 하게 된다.
+
+로그인은 "누구냐" 만 정한다. 유튜브 권한은 여기서 받지 않는다 — 그건
+channels.connect_start 에서 채널 주인 계정으로 따로 받는다.
 """
 
+import re
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,10 +28,107 @@ from app.db.models import (
 )
 from app.db.session import get_db
 from app.services import google_oauth as goog
+from app.services.password import MIN_LENGTH, hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 CALLBACK_PATH = "/api/auth/google/callback"
+
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _set_session_cookie(resp: Response, token: str) -> None:
+    resp.set_cookie(
+        COOKIE,
+        token,
+        max_age=SESSION_DAYS * 86400,
+        httponly=True,           # JS 가 못 읽는다. XSS 로 세션을 훔치기 어려워진다.
+        samesite="lax",          # 남의 사이트에서 온 요청에는 쿠키를 안 붙인다.
+        secure=get_settings().session_cookie_secure,
+        path="/",
+    )
+
+
+# ── 이메일 + 비밀번호 ─────────────────────────────────────────
+
+
+class SignupIn(BaseModel):
+    email: str = Field(..., max_length=255)
+    password: str = Field(..., min_length=MIN_LENGTH, max_length=200)
+    name: str | None = Field(None, max_length=100)
+
+
+class LoginIn(BaseModel):
+    email: str = Field(..., max_length=255)
+    password: str = Field(..., max_length=200)
+
+
+class LoggedIn(BaseModel):
+    email: str
+    name: str | None
+    next: str = "/app"
+
+
+def _norm_email(e: str) -> str:
+    e = e.strip().lower()
+    if not _EMAIL.match(e):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "이메일 형식이 아닙니다")
+    return e
+
+
+@router.post("/signup", response_model=LoggedIn, status_code=201, summary="이메일로 가입")
+async def signup(payload: SignupIn, response: Response, db: AsyncSession = Depends(get_db)):
+    """가입하면 바로 로그인된 상태가 된다. 개인 워크스페이스도 같이 만든다.
+
+    이미 있는 이메일이면 409. Google 로 들어온 계정의 이메일도 마찬가지다 —
+    그 이메일이 정말 이 사람 것인지 확인할 방법이 없어서, 비밀번호를 붙여주면
+    남의 계정을 가져가는 길이 된다.
+    """
+    email = _norm_email(payload.email)
+    exists = (await db.execute(select(User.id).where(User.email == email))).scalar_one_or_none()
+    if exists is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "이미 가입된 이메일입니다. Google 로 만든 계정이면 'Google로 계속하기' 를 누르세요.",
+        )
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    user = User(
+        email=email,
+        name=(payload.name or "").strip() or email.split("@")[0],
+        password_hash=hash_password(payload.password),
+        last_login_at=now,
+    )
+    db.add(user)
+    await db.flush()
+    await _ensure_workspace(db, user)
+    session = Session.new(user.id)
+    db.add(session)
+    await db.commit()
+
+    _set_session_cookie(response, session.token)
+    return LoggedIn(email=user.email, name=user.name)
+
+
+@router.post("/login", response_model=LoggedIn, summary="이메일로 로그인")
+async def login_with_password(
+    payload: LoginIn, response: Response, db: AsyncSession = Depends(get_db)
+):
+    """틀리면 이유를 가르지 않는다. "그런 이메일 없음" 과 "비밀번호 틀림" 을
+    다르게 말하면, 어떤 이메일이 가입돼 있는지 밖에서 알아낼 수 있다."""
+    email = _norm_email(payload.email)
+    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if user is None or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "이메일 또는 비밀번호가 맞지 않습니다")
+
+    user.last_login_at = datetime.now(UTC).replace(tzinfo=None)
+    await _ensure_workspace(db, user)
+    session = Session.new(user.id)
+    db.add(session)
+    await db.commit()
+
+    _set_session_cookie(response, session.token)
+    return LoggedIn(email=user.email, name=user.name)
 
 
 class Me(BaseModel):
@@ -94,7 +195,10 @@ async def callback(
     )
     profile = await goog.fetch_profile(tokens.access_token)
 
-    user = await _upsert_user(db, profile)
+    try:
+        user = await _upsert_user(db, profile)
+    except PasswordAccount:
+        return RedirectResponse("/app?login_error=password_account")
     session = Session.new(user.id)
     db.add(session)
     await db.commit()
@@ -112,11 +216,20 @@ async def callback(
     return resp
 
 
+class PasswordAccount(Exception):
+    """이 이메일은 비밀번호로 가입한 계정이다 — Google 로 이어붙이지 않는다."""
+
+
 async def _upsert_user(db: AsyncSession, p: goog.GoogleProfile) -> User:
     """구글 sub 로 찾고, 없으면 이메일로 한 번 더 찾는다.
 
     이메일로도 보는 이유: 초안 데이터나 수동으로 만든 계정에는 google_id 가
     없을 수 있다. 그런 계정에 sub 를 채워 넣어 이어붙인다.
+
+    단, 비밀번호로 가입한 계정에는 이어붙이지 않는다. 가입 때 이메일 소유를
+    확인하지 않으므로, 누가 남의 이메일로 먼저 가입해 두면 그 사람이 나중에
+    Google 로 들어올 때 두 로그인이 한 계정에 묶여 채널을 같이 보게 된다.
+    (2026-09-17 이메일 가입을 넣으면서 생긴 구멍. 메일 인증을 붙이면 풀 수 있다.)
     """
     user = (
         await db.execute(select(User).where(User.google_id == p.sub))
@@ -125,6 +238,8 @@ async def _upsert_user(db: AsyncSession, p: goog.GoogleProfile) -> User:
         user = (
             await db.execute(select(User).where(User.email == p.email))
         ).scalar_one_or_none()
+        if user is not None and user.password_hash:
+            raise PasswordAccount(p.email)
 
     now = datetime.now(UTC).replace(tzinfo=None)
     if user is None:

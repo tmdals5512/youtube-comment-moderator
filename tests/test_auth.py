@@ -442,3 +442,22 @@ class TestStats:
         assert s["review_rate"] == 1.0
         # 시간 추정치는 더 내보내지 않는다.
         assert "seconds_per_item" not in s["workload"]
+
+
+def test_채널_연동은_로그인한_계정을_미리_골라둔다():
+    """로그인 → 채널 연결이 '구글 두 번' 으로 보이는 걸 줄인다. 같은 계정이면
+    계정 선택 화면에 그 계정이 골라져 있어 한 번 클릭. 강제는 아니다 — 채널이
+    다른 계정에 있으면 바꿔 고를 수 있다."""
+    from urllib.parse import parse_qs, urlparse
+
+    from app.services import google_oauth as g
+
+    url = g.authorize_url(
+        "cid", "http://localhost:8000/cb", g.YOUTUBE_SCOPES, "st",
+        offline=True, login_hint="minjun@mcn.com",
+    )
+    assert parse_qs(urlparse(url).query)["login_hint"] == ["minjun@mcn.com"]
+
+    # 로그인 자체에는 힌트를 주지 않는다 — 어느 계정으로 들어올지는 사용자가 정한다
+    url = g.authorize_url("cid", "http://localhost:8000/cb", g.LOGIN_SCOPES, "st")
+    assert "login_hint" not in url
