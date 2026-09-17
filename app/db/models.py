@@ -346,3 +346,38 @@ class Action(Base):
     executed_at: Mapped[datetime | None] = mapped_column(
         DateTime, server_default=func.now()
     )
+
+
+class LabelTask(Base):
+    """사람이 매기는 정답 — 한 사람에게 배정된 댓글 하나.
+
+    AI 판정이 맞았는지 잴 기준이 없어서 만든다. 답지를 AI 가 만들면 자기
+    답을 답지로 삼는 셈이라 항상 100점이 나온다.
+
+    같은 댓글이 여러 사람에게 배정될 수 있다 (segment='공통'). 그 구간에서
+    사람끼리 얼마나 갈리는지가 AI 정확도의 천장이다 — 사람도 못 정하는 걸
+    AI 가 맞힐 수는 없다.
+
+    라벨링 화면(/label)은 이 표만 읽고 쓴다. AI 판정(risk_assessments)은
+    절대 화면에 내보내지 않는다 — 보이면 사람이 따라간다.
+    """
+
+    __tablename__ = "label_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    labeler: Mapped[str] = mapped_column(String(50), index=True)
+    comment_id: Mapped[int] = mapped_column(ForeignKey("comments.id"), index=True)
+    # 그 사람 목록 안에서의 순서. 공통 구간을 앞에 두어 중간에 그만둬도
+    # 일치도 계산은 되게 한다.
+    position: Mapped[int] = mapped_column(Integer)
+    segment: Mapped[str] = mapped_column(String(10))   # 공통 / 개별
+    # 어디서 뽑았나. 큐에서 뽑은 것과 통과분에서 뽑은 것은 실제 비율이 달라
+    # 채점할 때 가중해야 한다.
+    source: Mapped[str] = mapped_column(String(10))    # 큐 / 통과
+
+    # hide / keep / unsure. NULL 이면 아직 안 함.
+    label: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    labeled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 화면에 뜬 뒤 버튼까지 걸린 초. '관리자가 댓글 하나 보는 데 몇 초' 의
+    # 유일한 실측이다.
+    seconds: Mapped[float | None] = mapped_column(Float, nullable=True)

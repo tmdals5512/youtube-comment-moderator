@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>댓글 라벨링</title>
+<style>
+  :root { --bg:#f6f6f8; --card:#fff; --text:#17171f; --muted:#6f6f7a; --line:#e3e3ea;
+          --hide:#dc2626; --keep:#16a34a; --unsure:#6b7280; --accent:#4f46e5; }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:15px/1.6 -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif }
+  .wrap { max-width:680px; margin:0 auto; padding:20px 16px 80px }
+  h1 { font-size:18px; margin:0 0 4px }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:18px }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px }
+  .bar { height:6px; background:var(--line); border-radius:3px; overflow:hidden; margin:10px 0 18px }
+  .bar i { display:block; height:100%; background:var(--accent); width:0; transition:width .2s }
+  .meta { font-size:12.5px; color:var(--muted); display:flex; justify-content:space-between; }
+  .video { font-size:13px; color:var(--muted); margin:14px 0 6px }
+  .parent { font-size:13px; color:var(--muted); background:#f0f0f4; border-left:3px solid var(--line);
+            padding:8px 12px; border-radius:6px; margin-bottom:10px; white-space:pre-wrap }
+  .body { font-size:19px; line-height:1.55; padding:16px 4px; white-space:pre-wrap; word-break:break-word;
+          min-height:64px }
+  .q { text-align:center; color:var(--muted); font-size:13px; margin:14px 0 10px }
+  .acts { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px }
+  .acts button { border:0; border-radius:12px; padding:18px 6px; font-size:16px; font-weight:700;
+                 color:#fff; cursor:pointer; touch-action:manipulation }
+  .acts button small { display:block; font-weight:400; font-size:11px; opacity:.85; margin-top:3px }
+  .hide { background:var(--hide) } .keep { background:var(--keep) } .unsure { background:var(--unsure) }
+  .acts button:active { transform:scale(.97) }
+  .undo { text-align:center; margin-top:14px; font-size:12.5px }
+  .undo a { color:var(--muted); cursor:pointer; text-decoration:underline }
+  .who { display:grid; gap:10px; margin-top:14px }
+  .who button { border:1px solid var(--line); background:#fff; border-radius:12px; padding:16px;
+                font-size:16px; text-align:left; cursor:pointer; display:flex; justify-content:space-between }
+  .who button span { color:var(--muted); font-size:13px }
+  .done { text-align:center; padding:40px 10px; }
+  .done .big { font-size:40px; margin-bottom:8px }
+  .note { font-size:12.5px; color:var(--muted); margin-top:20px; line-height:1.7 }
+  .err { color:var(--hide); font-size:13px; padding:12px }
+  kbd { font:11px monospace; background:#eee; color:#444; border-radius:4px; padding:1px 5px }
+</style>
+</head>
+<body>
+<div class="wrap" id="root"></div>
+
+<script>
+/* 라벨링 화면. AI 판정은 여기 어디에도 안 옵니다 — API 가 안 보냅니다.
+ * 누르는 사람이 보는 건 관리자가 보는 것과 같습니다: 영상 제목, 부모 댓글, 본문. */
+
+const $ = (s) => document.querySelector(s);
+const root = $("#root");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+
+// 팀 비밀번호. 서버가 LABEL_KEY 를 두면 없이는 401. 한 번 맞으면 이 브라우저에 기억.
+let labelKey = null; try { labelKey = localStorage.getItem("labelKey"); } catch {}
+
+async function api(path, opts) {
+  const r = await fetch("/api/label" + path, {
+    headers: { "Content-Type": "application/json", ...(labelKey ? { "X-Label-Key": labelKey } : {}) },
+    ...opts,
+  });
+  if (r.status === 401) {
+    const k = prompt("팀 비밀번호를 입력하세요");
+    if (k === null) throw new Error("비밀번호가 필요합니다");
+    labelKey = k; try { localStorage.setItem("labelKey", k); } catch {}
+    return api(path, opts);
+  }
+  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 120)}`);
+  return r.json();
+}
+
+let who = null;
+let shownAt = 0;
+let current = null;
+
+function pickWho(list) {
+  root.innerHTML = `
+    <h1>댓글 라벨링</h1>
+    <div class="sub">누구세요?</div>
+    <div class="who">
+      ${list.map(l => `<button data-who="${esc(l.name)}">${esc(l.name)}
+          <span>${l.done} / ${l.total}</span></button>`).join("")}
+    </div>
+    <div class="note">
+      영상 제목과 부모 댓글을 보고, <b>이 채널 관리자라면</b> 이 댓글을 어떻게 할지 누르세요.<br>
+      정답이 있는 게 아닙니다. 고민되면 <b>모르겠음</b>이 맞는 답입니다 — 그게 우리가 알아야 하는 것입니다.<br>
+      중간에 나가도 이어서 됩니다. 키보드 <kbd>1</kbd> 숨김 <kbd>2</kbd> 유지 <kbd>3</kbd> 모르겠음
+    </div>`;
+  root.querySelectorAll("[data-who]").forEach(b => b.onclick = () => {
+    who = b.dataset.who;
+    try { localStorage.setItem("labeler", who); } catch {}
+    load();
+  });
+}
+
+async function load() {
+  let t;
+  try { t = await api(`/next?who=${encodeURIComponent(who)}`); }
+  catch (e) { root.innerHTML = `<div class="err">불러오지 못했습니다: ${esc(e.message)}</div>`; return; }
+  current = t;
+  const pct = t.total ? (t.done / t.total * 100) : 0;
+
+  if (!t.task_id) {
+    root.innerHTML = `
+      <h1>댓글 라벨링</h1>
+      <div class="sub">${esc(who)}</div>
+      <div class="card done">
+        <div class="big">🎉</div>
+        <div><b>${t.total}건 전부 끝났습니다.</b> 고생하셨습니다.</div>
+        ${t.last_task_id ? `<div class="undo" style="margin-top:18px"><a id="undo">마지막 것 취소</a></div>` : ""}
+      </div>`;
+    const u = $("#undo"); if (u) u.onclick = undo;
+    return;
+  }
+
+  const c = t.comment;
+  root.innerHTML = `
+    <h1>댓글 라벨링</h1>
+    <div class="meta"><span>${esc(who)}</span><span>${t.done + 1} / ${t.total}</span></div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <div class="card">
+      ${c.channel_title || c.video_title
+        ? `<div class="video">${esc(c.channel_title || "")}${c.channel_title && c.video_title ? " · " : ""}${esc(c.video_title || "")}</div>`
+        : ""}
+      ${c.parent_content ? `<div class="parent">↳ ${esc(c.parent_content).slice(0, 300)}</div>` : ""}
+      <div class="body">${esc(c.content)}</div>
+      <div class="q">이 채널 관리자라면?</div>
+      <div class="acts">
+        <button class="hide"   data-l="hide">숨김<small>1</small></button>
+        <button class="keep"   data-l="keep">유지<small>2</small></button>
+        <button class="unsure" data-l="unsure">모르겠음<small>3</small></button>
+      </div>
+      ${t.last_task_id ? `<div class="undo"><a id="undo">직전 답 취소</a></div>` : ""}
+    </div>`;
+  shownAt = performance.now();
+  root.querySelectorAll("[data-l]").forEach(b => b.onclick = () => answer(b.dataset.l));
+  const u = $("#undo"); if (u) u.onclick = undo;
+}
+
+let busy = false;
+async function answer(label) {
+  if (busy || !current?.task_id) return;
+  busy = true;
+  const seconds = Math.round((performance.now() - shownAt) / 100) / 10;
+  try { await api(`/${current.task_id}`, { method:"POST", body: JSON.stringify({ label, seconds }) }); }
+  catch (e) { alert("저장 실패: " + e.message); busy = false; return; }
+  busy = false;
+  load();
+}
+
+async function undo() {
+  if (busy || !current?.last_task_id) return;
+  busy = true;
+  try { await api(`/${current.last_task_id}/undo`, { method:"POST" }); }
+  catch (e) { alert("취소 실패: " + e.message); }
+  busy = false;
+  load();
+}
+
+document.addEventListener("keydown", (e) => {
+  if (!current?.task_id) return;
+  if (e.key === "1") answer("hide");
+  else if (e.key === "2") answer("keep");
+  else if (e.key === "3") answer("unsure");
+});
+
+(async () => {
+  let list;
+  try { list = await api("/labelers"); }
+  catch (e) { root.innerHTML = `<div class="err">서버에 연결되지 않습니다: ${esc(e.message)}</div>`; return; }
+  if (!list.length) {
+    root.innerHTML = `<div class="err">배정된 작업이 없습니다. <code>python -m scripts.make_label_tasks</code> 를 먼저 돌려야 합니다.</div>`;
+    return;
+  }
+  let saved = null; try { saved = localStorage.getItem("labeler"); } catch {}
+  if (saved && list.some(l => l.name === saved)) { who = saved; load(); }
+  else pickWho(list);
+})();
+</script>
+</body>
+</html>

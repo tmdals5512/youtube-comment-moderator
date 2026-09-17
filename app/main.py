@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-from app.api import auth, channels, health, moderation, review, rules
+from app.api import auth, channels, health, label, moderation, review, rules
 from app.core.config import get_settings
 from app.db.session import engine
 from app.services import retention, watcher
@@ -86,6 +86,7 @@ app.include_router(channels.router, prefix="/api")
 app.include_router(rules.router, prefix="/api")
 app.include_router(moderation.router, prefix="/api")
 app.include_router(review.router, prefix="/api")
+app.include_router(label.router, prefix="/api")
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -137,3 +138,9 @@ async def onboarding(step: int) -> FileResponse:
 async def admin() -> FileResponse:
     """관리자 화면 (대시보드·검토 큐·숨김·관리 기준·이력)."""
     return _page(STATIC_DIR / "app.html")
+
+
+@app.get("/label", include_in_schema=False)
+async def label_page() -> FileResponse:
+    """사람 라벨링. 팀 내부용 — 인증 없음. AI 판정은 화면에 안 나온다."""
+    return _page(STATIC_DIR / "label.html")

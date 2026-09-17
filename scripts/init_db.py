@@ -72,6 +72,22 @@ STATEMENTS = [
     # 영상별 맥락. 채널 맥락과 나눈 이유는 models.Video.context 주석 참고.
     "ALTER TABLE videos ADD COLUMN IF NOT EXISTS context TEXT",
 
+    # ── 사람 라벨링 (정답 세트) ──
+    # 누가 어느 댓글을 봤고 뭘 눌렀나. AI 판정은 여기 없다 — models.LabelTask 주석 참고.
+    """CREATE TABLE IF NOT EXISTS label_tasks (
+        id          SERIAL PRIMARY KEY,
+        labeler     VARCHAR(50) NOT NULL,
+        comment_id  INTEGER NOT NULL REFERENCES comments(id),
+        position    INTEGER NOT NULL,
+        segment     VARCHAR(10) NOT NULL,
+        source      VARCHAR(10) NOT NULL,
+        label       VARCHAR(10),
+        labeled_at  TIMESTAMP,
+        seconds     DOUBLE PRECISION
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_label_tasks_labeler ON label_tasks (labeler)",
+    "CREATE INDEX IF NOT EXISTS ix_label_tasks_comment_id ON label_tasks (comment_id)",
+
     # ── 댓글 수집기 (F_R_107) ──
     # 답글 지원
     "ALTER TABLE comments ADD COLUMN IF NOT EXISTS parent_comment_id VARCHAR(64)",
