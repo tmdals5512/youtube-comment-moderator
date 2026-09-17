@@ -5,7 +5,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-Action = Literal["block", "review", "allow"]
+# 예외(allow) 는 뺐다 (2026-09-17). "이 단어는 걸지 마라" 는 관리자가 쓸 일이 거의
+# 없고, 있어도 차단어를 더 좁게 쓰는 편이 낫다. 선택지가 늘수록 설정 화면이 어려워진다.
+Action = Literal["block", "review"]
 
 
 class RuleCreate(BaseModel):

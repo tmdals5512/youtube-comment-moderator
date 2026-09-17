@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import ChannelRule
 from app.services.pattern import FLAGS, normalize
 
-# 검사 순서. allow를 가장 먼저 봐야 예외 단어가 차단 규칙을 이긴다.
-ACTION_ORDER = ("allow", "block", "review")
+# 검사 순서. 차단이 검토를 이긴다. (예외 동작은 2026-09-17 에 뺐다 — schemas.Action 참고)
+ACTION_ORDER = ("block", "review")
 
 
 @dataclass
@@ -40,15 +40,6 @@ def judge_rules(rules: Sequence[ChannelRule], text: str) -> Verdict:
             hit = re.search(rule.compiled_regex, text, FLAGS)
             if not hit:
                 continue
-
-            if action == "allow":
-                return Verdict(
-                    verdict="pass",
-                    matched_rule_id=rule.id,
-                    matched_pattern=rule.rule_value,
-                    matched_text=hit.group(),
-                    reason=f"예외 단어 '{rule.rule_value}'에 해당",
-                )
 
             return Verdict(
                 verdict=action,
